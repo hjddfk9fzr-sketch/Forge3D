@@ -25,9 +25,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const PANEL: Color32 = Color32::from_rgb(24, 30, 43);
-const HEADER: Color32 = Color32::from_rgb(15, 20, 30);
-const LINE: Color32 = Color32::from_rgb(49, 61, 82);
+const PANEL: Color32 = Color32::from_rgb(31, 34, 39);
+const HEADER: Color32 = Color32::from_rgb(22, 24, 29);
+const LINE: Color32 = Color32::from_rgb(61, 66, 74);
 const ACCENT: Color32 = Color32::from_rgb(110, 222, 196);
 const MUTED: Color32 = Color32::from_rgb(153, 169, 195);
 const UI_SCALES: [u16; 5] = [100, 125, 150, 175, 200];
@@ -89,15 +89,15 @@ fn configure_style(ctx: &egui::Context) {
     style.visuals = egui::Visuals::dark();
     style.visuals.panel_fill = PANEL;
     style.visuals.window_fill = PANEL;
-    style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(40, 50, 73);
-    style.visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(40, 50, 73);
-    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(58, 73, 105);
-    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(58, 73, 105);
-    style.visuals.selection.bg_fill = Color32::from_rgb(53, 74, 128);
+    style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(43, 47, 54);
+    style.visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(43, 47, 54);
+    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(59, 67, 78);
+    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(59, 67, 78);
+    style.visuals.selection.bg_fill = Color32::from_rgb(43, 78, 79);
     style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
     style.visuals.window_stroke = egui::Stroke::new(1.0_f32, LINE);
-    style.spacing.interact_size.y = 25.;
-    style.spacing.item_spacing = egui::vec2(7., 6.);
+    style.spacing.interact_size.y = 22.;
+    style.spacing.item_spacing = egui::vec2(6., 4.);
     ctx.set_style(style);
     ctx.options_mut(|options| options.zoom_with_keyboard = false);
 }
@@ -126,6 +126,7 @@ enum Action {
     PrefabCreate,
     AssetUsage,
     ColorShader,
+    Reimport(u64),
 }
 
 impl Action {
@@ -150,6 +151,7 @@ impl Action {
             Self::Script => "Script Editor",
             Self::ProjectSave => "Save project",
             Self::ProjectAdd => "Add scene to project",
+            Self::Reimport(_) => "Reimport model",
             Self::ColorShader => "Scene color shader",
             Self::AssetUsage => "Where used",
             Self::PrefabCreate => "Create prefab",
@@ -161,6 +163,7 @@ impl Action {
             Self::ColorShader => {
                 "GLSL function body · vec3 forge_color(vec3 rgb, vec2 uv, float time)"
             }
+            Self::Reimport(_) => "Replacement model file (.obj, .fbx, .gltf or .glb)",
             Self::AssetUsage => "Select a model or shared script to see the objects that use it.",
             Self::New => "Create an empty scene",
             Self::PhysicsDemo => "Load the Physics Workshop scene",
@@ -385,6 +388,7 @@ struct Editor {
     pointer_edit: bool,
     dock: DockTab,
     collapsed: HashSet<u64>,
+    focus_viewport: bool,
     show_hierarchy: bool,
     show_inspector: bool,
     show_project: bool,
@@ -438,6 +442,7 @@ impl Editor {
             pointer_edit: false,
             dock: DockTab::Project,
             collapsed: HashSet::new(),
+            focus_viewport: false,
             show_hierarchy: true,
             show_inspector: true,
             show_project: true,
@@ -536,6 +541,7 @@ impl Editor {
                         ui.menu_button("Project", |ui| self.project_menu(ui));
                     });
                     ui.menu_button("Workspace", |ui| {
+                        ui.checkbox(&mut self.focus_viewport, "Focus viewport");
                         ui.checkbox(&mut self.show_hierarchy, "Hierarchy");
                         ui.checkbox(&mut self.show_inspector, "Inspector");
                         ui.checkbox(&mut self.show_project, "Project dock");
@@ -641,27 +647,6 @@ impl Editor {
                                 }
                             });
                     });
-                });
-            });
-
-        egui::TopBottomPanel::top("playback-toolbar")
-            .frame(compact_frame())
-            .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .selectable_label(self.preview.is_none(), "Scene")
-                        .clicked()
-                        && self.preview.is_some()
-                    {
-                        self.command(Command::Play);
-                    }
-                    if ui
-                        .selectable_label(self.preview.is_some(), "Game")
-                        .clicked()
-                        && self.preview.is_none()
-                    {
-                        self.command(Command::Play);
-                    }
                     ui.separator();
                     if ui
                         .button(
@@ -698,19 +683,6 @@ impl Editor {
                     {
                         self.command(Command::Step);
                     }
-                    if self.preview.is_none() {
-                        ui.separator();
-                        for tool in TRANSFORM_TOOLS {
-                            let command = Command::Tool(tool);
-                            ui.selectable_value(&mut self.transform_tool, tool, command.title())
-                                .on_hover_text(ui.ctx().format_shortcut(&command.key()));
-                        }
-                        ui.separator();
-                        if ui.button("Frame").on_hover_text("F").clicked() {
-                            self.frame_selection();
-                        }
-                        ui.checkbox(&mut self.grid, "Grid");
-                    }
                 });
             });
         let playing = self.preview.is_some();
@@ -741,10 +713,43 @@ impl Editor {
                 });
             });
 
-        if self.show_project {
+        let panel_limit = ctx.available_rect().width()
+            / if self.show_hierarchy && self.show_inspector {
+                3.
+            } else {
+                2.
+            };
+        if self.show_hierarchy && !self.focus_viewport {
+            let max_width = panel_limit.min(350.);
+            let panel = if self.swap_docks {
+                egui::SidePanel::right("hierarchy-right")
+            } else {
+                egui::SidePanel::left("hierarchy")
+            };
+            panel
+                .default_width(max_width.min(254.))
+                .width_range(max_width.min(182.)..=max_width)
+                .frame(panel_frame())
+                .show(ctx, |ui| self.hierarchy(ui, playing));
+        }
+        if self.show_inspector && !self.focus_viewport {
+            let max_width = panel_limit.min(410.);
+            let panel = if self.swap_docks {
+                egui::SidePanel::left("inspector-left")
+            } else {
+                egui::SidePanel::right("inspector")
+            };
+            panel
+                .default_width(max_width.min(312.))
+                .width_range(max_width.min(220.)..=max_width)
+                .frame(panel_frame())
+                .show(ctx, |ui| self.inspector(ui, playing));
+        }
+
+        if self.show_project && !self.focus_viewport {
             egui::TopBottomPanel::bottom("project-browser")
                 .resizable(true)
-                .default_height(170.)
+                .default_height(185.)
                 .height_range(110.0..=400.0)
                 .frame(panel_frame())
                 .show(ctx, |ui| {
@@ -761,39 +766,42 @@ impl Editor {
                     }
                 });
         }
-        let panel_limit = ctx.available_rect().width()
-            / if self.show_hierarchy && self.show_inspector {
-                3.
-            } else {
-                2.
-            };
-        if self.show_hierarchy {
-            let max_width = panel_limit.min(350.);
-            let panel = if self.swap_docks {
-                egui::SidePanel::right("hierarchy-right")
-            } else {
-                egui::SidePanel::left("hierarchy")
-            };
-            panel
-                .default_width(max_width.min(254.))
-                .width_range(max_width.min(182.)..=max_width)
-                .frame(panel_frame())
-                .show(ctx, |ui| self.hierarchy(ui, playing));
-        }
-        if self.show_inspector {
-            let max_width = panel_limit.min(410.);
-            let panel = if self.swap_docks {
-                egui::SidePanel::left("inspector-left")
-            } else {
-                egui::SidePanel::right("inspector")
-            };
-            panel
-                .default_width(max_width.min(312.))
-                .width_range(max_width.min(220.)..=max_width)
-                .frame(panel_frame())
-                .show(ctx, |ui| self.inspector(ui, playing));
-        }
-
+        egui::TopBottomPanel::top("viewport-tools")
+            .frame(compact_frame().fill(HEADER))
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .selectable_label(self.preview.is_none(), "Scene")
+                        .clicked()
+                        && self.preview.is_some()
+                    {
+                        self.command(Command::Play);
+                    }
+                    if ui
+                        .selectable_label(self.preview.is_some(), "Game")
+                        .clicked()
+                        && self.preview.is_none()
+                    {
+                        self.command(Command::Play);
+                    }
+                    ui.separator();
+                    if self.preview.is_none() {
+                        for tool in TRANSFORM_TOOLS {
+                            let command = Command::Tool(tool);
+                            ui.selectable_value(&mut self.transform_tool, tool, command.title())
+                                .on_hover_text(ui.ctx().format_shortcut(&command.key()));
+                        }
+                        ui.separator();
+                        if ui.button("Frame").on_hover_text("F").clicked() {
+                            self.frame_selection();
+                        }
+                        ui.checkbox(&mut self.grid, "Grid");
+                    }
+                    ui.toggle_value(&mut self.focus_viewport, "Focus")
+                        .on_hover_text("Expand the viewport or restore your dock layout");
+                });
+            });
+        let playing = self.preview.is_some();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
@@ -973,6 +981,7 @@ impl Editor {
     }
 
     fn open_console(&mut self) {
+        self.focus_viewport = false;
         self.show_project = true;
         self.dock = DockTab::Console;
     }
@@ -1058,50 +1067,64 @@ impl Editor {
         egui::ScrollArea::vertical()
             .id_salt("project-files")
             .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for entry in &self.browser.entries {
-                        if !entry.name.to_lowercase().contains(&filter) {
-                            continue;
-                        }
-                        let path = self.browser.directory.join(&entry.name);
-                        let label = if entry.kind == "directory" {
-                            format!("{}/", entry.name)
-                        } else {
-                            entry.name.clone()
+                for entry in &self.browser.entries {
+                    if !entry.name.to_lowercase().contains(&filter) {
+                        continue;
+                    }
+                    let path = self.browser.directory.join(&entry.name);
+                    let label = if entry.kind == "directory" {
+                        format!("{}/", entry.name)
+                    } else {
+                        entry.name.clone()
+                    };
+                    let item = ui
+                        .horizontal(|ui| {
+                            ui.add_sized(
+                                [52., 18.],
+                                egui::Label::new(
+                                    RichText::new(if entry.kind == "directory" {
+                                        "Folder"
+                                    } else {
+                                        entry.kind
+                                    })
+                                    .small()
+                                    .color(MUTED),
+                                ),
+                            );
+                            ui.add_enabled(
+                                !playing || entry.kind == "directory",
+                                egui::Button::new(label).frame(false),
+                            )
+                        })
+                        .inner;
+                    let mut activate = item.clicked();
+                    item.context_menu(|ui| {
+                        let label = match entry.kind {
+                            "directory" | "scene" | "project" => Some("Open"),
+                            "model" | "script" => Some("Import…"),
+                            _ => None,
                         };
-                        let item = ui.add_enabled(
-                            !playing || entry.kind == "directory",
-                            egui::Button::new(label),
-                        );
-                        let mut activate = item.clicked();
-                        item.context_menu(|ui| {
-                            let label = match entry.kind {
-                                "directory" | "scene" | "project" => Some("Open"),
-                                "model" | "script" => Some("Import…"),
-                                _ => None,
-                            };
-                            if let Some(label) = label {
-                                if ui.button(label).clicked() {
-                                    activate = true;
-                                    ui.close_menu();
-                                }
-                            }
-                            if ui.button("Copy path").clicked() {
-                                ui.ctx().copy_text(path.display().to_string());
+                        if let Some(label) = label {
+                            if ui.button(label).clicked() {
+                                activate = true;
                                 ui.close_menu();
                             }
-                        });
-                        if activate {
-                            match entry.kind {
-                                "directory" => directory = Some(path),
-                                "scene" | "project" => action = Some((Action::Open, path)),
-                                "model" => action = Some((Action::Import, path)),
-                                "script" => action = Some((Action::ImportScript, path)),
-                                _ => {}
-                            }
+                        }
+                        if ui.button("Copy path").clicked() {
+                            ui.ctx().copy_text(path.display().to_string());
+                            ui.close_menu();
+                        }
+                    });
+                    if activate {
+                        match entry.kind {
+                            "directory" => directory = Some(path),
+                            "scene" | "project" => action = Some((Action::Open, path)),
+                            "model" => action = Some((Action::Import, path)),
+                            "script" => action = Some((Action::ImportScript, path)),
+                            _ => {}
                         }
                     }
-                });
+                }
             });
         if let Some(directory) = directory {
             self.browser.directory = directory;
@@ -1140,7 +1163,10 @@ impl Editor {
     }
 
     fn hierarchy(&mut self, ui: &mut egui::Ui, playing: bool) {
-        section(ui, "Hierarchy");
+        ui.horizontal_wrapped(|ui| {
+            section(ui, "Hierarchy");
+            ui.add_enabled_ui(!playing, |ui| self.context_create(ui));
+        });
         ui.add(egui::TextEdit::singleline(&mut self.object_filter).hint_text("Find objects"));
         ui.label(
             RichText::new(format!(
@@ -1151,18 +1177,6 @@ impl Editor {
             .color(MUTED),
         );
         ui.add_enabled_ui(!playing, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (label, shape) in [
-                    ("Empty", Shape::Empty),
-                    ("Cube", Shape::Cube),
-                    ("Sphere", Shape::Sphere),
-                    ("Plane", Shape::Plane),
-                ] {
-                    if ui.small_button(format!("+ {label}")).clicked() {
-                        self.add(Object::new(label, shape));
-                    }
-                }
-            });
             ui.separator();
             let mut context = None;
             egui::ScrollArea::vertical()
@@ -1189,19 +1203,11 @@ impl Editor {
                             continue;
                         }
                         let object = &self.scene.objects[i];
-                        let icon = match object.shape {
-                            Shape::Empty => "·",
-                            Shape::Cube => "◇",
-                            Shape::Sphere => "○",
-                            Shape::Plane => "▱",
-                            Shape::Model(_) => "△",
-                        };
-                        let label = format!("{icon}  {}", object.name);
-                        let label = if object.visible {
-                            RichText::new(label)
+                        let label = RichText::new(&object.name).color(if object.visible {
+                            ui.visuals().text_color()
                         } else {
-                            RichText::new(label).color(MUTED)
-                        };
+                            MUTED
+                        });
                         let id = object.id;
                         let has_children = parents.contains(&id);
                         let mut selected = false;
@@ -1223,6 +1229,43 @@ impl Editor {
                                 }
                             } else {
                                 ui.add_space(18.);
+                            }
+                            let (icon, _) =
+                                ui.allocate_exact_size(egui::vec2(12., 14.), egui::Sense::hover());
+                            let c = icon.center();
+                            let ink = if object.visible { ACCENT } else { MUTED };
+                            let pen = egui::Stroke::new(1.3_f32, ink);
+                            match object.shape {
+                                Shape::Sphere => {
+                                    ui.painter().circle_stroke(c, 4.4, pen);
+                                }
+                                Shape::Cube => {
+                                    ui.painter().rect_stroke(
+                                        egui::Rect::from_center_size(c, egui::vec2(8., 8.)),
+                                        1.,
+                                        pen,
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                Shape::Plane => {
+                                    ui.painter().line_segment(
+                                        [c - egui::vec2(5., -2.), c + egui::vec2(5., -2.)],
+                                        pen,
+                                    );
+                                }
+                                Shape::Model(_) => {
+                                    ui.painter().add(egui::Shape::closed_line(
+                                        vec![
+                                            c + egui::vec2(0., -5.),
+                                            c + egui::vec2(5., 4.),
+                                            c + egui::vec2(-5., 4.),
+                                        ],
+                                        pen,
+                                    ));
+                                }
+                                Shape::Empty => {
+                                    ui.painter().circle_filled(c, 1.8, ink);
+                                }
                             }
                             let item = ui
                                 .selectable_label(self.selected == Some(i), label)
@@ -1251,92 +1294,95 @@ impl Editor {
 
     fn assets(&mut self, ui: &mut egui::Ui, playing: bool) {
         ui.add_enabled_ui(!playing, |ui| {
-            if ui.small_button("Import model…").clicked() {
-                self.prompt(Action::Import);
-            }
-            let has_assets = !self.scene.models.is_empty()
-                || !self.scene.scripts.is_empty()
-                || self.project.as_ref().is_some_and(|open| {
-                    !open.project.models().is_empty() || !open.project.scripts().is_empty()
-                });
-            if ui
-                .add_enabled(has_assets, egui::Button::new("Where used…"))
-                .clicked()
-            {
-                self.prompt(Action::AssetUsage);
-                let snapshot = match &self.project {
-                    Some(open) => open.snapshot(&self.scene),
-                    None => Project::new("scene", &self.scene),
-                };
-                if let Some(dialog) = &mut self.dialog {
-                    match snapshot {
-                        Ok(project) => {
-                            if let Some(id) = project
-                                .models()
-                                .keys()
-                                .next()
-                                .copied()
-                                .map(SharedAsset::Model)
-                                .or_else(|| {
-                                    project
-                                        .scripts()
-                                        .keys()
-                                        .next()
-                                        .copied()
-                                        .map(SharedAsset::Script)
-                                })
-                            {
-                                let rows = asset_usage_rows(&project, id);
-                                dialog.usage = Some((project, id, rows));
+            ui.horizontal_wrapped(|ui| {
+                if ui.small_button("Import model…").clicked() {
+                    self.prompt(Action::Import);
+                }
+                let has_assets = !self.scene.models.is_empty()
+                    || !self.scene.scripts.is_empty()
+                    || self.project.as_ref().is_some_and(|open| {
+                        !open.project.models().is_empty() || !open.project.scripts().is_empty()
+                    });
+                if ui
+                    .add_enabled(has_assets, egui::Button::new("Where used…"))
+                    .clicked()
+                {
+                    self.prompt(Action::AssetUsage);
+                    let snapshot = match &self.project {
+                        Some(open) => open.snapshot(&self.scene),
+                        None => Project::new("scene", &self.scene),
+                    };
+                    if let Some(dialog) = &mut self.dialog {
+                        match snapshot {
+                            Ok(project) => {
+                                if let Some(id) = project
+                                    .models()
+                                    .keys()
+                                    .next()
+                                    .copied()
+                                    .map(SharedAsset::Model)
+                                    .or_else(|| {
+                                        project
+                                            .scripts()
+                                            .keys()
+                                            .next()
+                                            .copied()
+                                            .map(SharedAsset::Script)
+                                    })
+                                {
+                                    let rows = asset_usage_rows(&project, id);
+                                    dialog.usage = Some((project, id, rows));
+                                }
                             }
+                            Err(error) => dialog.error = Some(error),
                         }
-                        Err(error) => dialog.error = Some(error),
                     }
                 }
-            }
-            ui.add(egui::TextEdit::singleline(&mut self.asset_filter).hint_text("Find assets"));
+                ui.add(egui::TextEdit::singleline(&mut self.asset_filter).hint_text("Find assets"));
+                if ui.small_button("Import .rhai…").clicked() {
+                    self.prompt(Action::ImportScript);
+                }
+                if ui.small_button("New shared script").clicked() {
+                    let name = (1..)
+                        .map(|index| format!("script-{index}.rhai"))
+                        .find(|name| self.scene.scripts.iter().all(|script| &script.name != name))
+                        .expect("finite number of scripts");
+                    self.show_script(ScriptEditor::new(
+                        ScriptTarget::NewShared,
+                        name,
+                        scripting::DEFAULT_SCRIPT.into(),
+                    ));
+                }
+            });
             let filter = self.asset_filter.to_lowercase();
-            if ui.small_button("Import .rhai…").clicked() {
-                self.prompt(Action::ImportScript);
-            }
-            if ui.small_button("New shared script").clicked() {
-                let name = (1..)
-                    .map(|index| format!("script-{index}.rhai"))
-                    .find(|name| self.scene.scripts.iter().all(|script| &script.name != name))
-                    .expect("finite number of scripts");
-                self.show_script(ScriptEditor::new(
-                    ScriptTarget::NewShared,
-                    name,
-                    scripting::DEFAULT_SCRIPT.into(),
-                ));
-            }
-            let mut edit = None;
-            for (index, script) in self.scene.scripts.iter().enumerate() {
-                if !script.name.to_lowercase().contains(&filter) {
-                    continue;
-                }
-                let item = ui
-                    .button(RichText::new(&script.name).monospace())
-                    .on_hover_text("Edit shared script");
-                if item.clicked() {
-                    edit = Some(index);
-                }
-                item.context_menu(|ui| {
-                    if ui.button("Edit script…").clicked() {
-                        edit = Some(index);
-                        ui.close_menu();
-                    }
-                });
-            }
-            if let Some(index) = edit {
-                self.open_script(ScriptTarget::Shared(index));
-            }
-            if self.scene.models.is_empty() {
-                ui.label(RichText::new("Import OBJ, FBX, glTF or GLB.").color(MUTED));
-            }
+            ui.separator();
             egui::ScrollArea::vertical()
-                .id_salt("assets")
+                .id_salt("asset-list")
                 .show(ui, |ui| {
+                    let mut edit = None;
+                    for (index, script) in self.scene.scripts.iter().enumerate() {
+                        if !script.name.to_lowercase().contains(&filter) {
+                            continue;
+                        }
+                        let item = ui
+                            .button(RichText::new(&script.name).monospace())
+                            .on_hover_text("Edit shared script");
+                        if item.clicked() {
+                            edit = Some(index);
+                        }
+                        item.context_menu(|ui| {
+                            if ui.button("Edit script…").clicked() {
+                                edit = Some(index);
+                                ui.close_menu();
+                            }
+                        });
+                    }
+                    if let Some(index) = edit {
+                        self.open_script(ScriptTarget::Shared(index));
+                    }
+                    if self.scene.models.is_empty() {
+                        ui.label(RichText::new("Import OBJ, FBX, glTF or GLB.").color(MUTED));
+                    }
                     for i in 0..self.scene.models.len() {
                         let model = &self.scene.models[i];
                         if !model.name.to_lowercase().contains(&filter) {
@@ -1440,14 +1486,20 @@ impl Editor {
                 self.dirty |= ui.text_edit_singleline(&mut object.name).changed();
                 self.dirty |= ui.checkbox(&mut object.visible, "Visible").changed();
                 ui.separator();
-                section(ui, "Transform");
-                self.dirty |= vector(ui, "Position", &mut object.position, 0.025);
-                self.dirty |= vector(ui, "Rotation (°)", &mut object.rotation, 0.5);
-                self.dirty |= vector(ui, "Scale", &mut object.scale, 0.025);
-                ui.separator();
-                section(ui, "Behaviors");
-                self.dirty |= number(ui, "Spin (°/s)", &mut object.spin, -720. ..=720.);
-                self.dirty |= number(ui, "Movement (units/s)", &mut object.speed, 0. ..=50.);
+                egui::CollapsingHeader::new("Transform")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        self.dirty |= vector(ui, "Position", &mut object.position, 0.025);
+                        self.dirty |= vector(ui, "Rotation (°)", &mut object.rotation, 0.5);
+                        self.dirty |= vector(ui, "Scale", &mut object.scale, 0.025);
+                    });
+                egui::CollapsingHeader::new("Behaviors")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        self.dirty |= number(ui, "Spin (°/s)", &mut object.spin, -720. ..=720.);
+                        self.dirty |=
+                            number(ui, "Movement (units/s)", &mut object.speed, 0. ..=50.);
+                    });
                 let rig = match object.shape {
                     Shape::Model(index) => self.scene.models[index].rig.as_deref(),
                     _ => None,
@@ -2165,7 +2217,7 @@ impl Editor {
                 .path
                 .as_deref()
                 .unwrap_or(Path::new("scene.forge.json")),
-            Action::Import | Action::ImportScript => Path::new(""),
+            Action::Import | Action::ImportScript | Action::Reimport(_) => Path::new(""),
             Action::Export => Path::new("game-export"),
             Action::Build => Path::new("game-build"),
             Action::RetryBuild => Path::new("game-build-retry"),
@@ -2271,6 +2323,11 @@ impl Editor {
                     if *selected != before {
                         *rows = asset_usage_rows(project, *selected);
                     }
+                    if let SharedAsset::Model(id) = *selected {
+                        if self.project.is_some() && ui.button("Reimport model…").clicked() {
+                            self.prompt(Action::Reimport(id));
+                        }
+                    }
                     if rows.is_empty() {
                         ui.label("Not used in this project.");
                     } else {
@@ -2282,6 +2339,9 @@ impl Editor {
                                 }
                             });
                     }
+                }
+                if let Action::Reimport(id) = dialog.action {
+                    ui.label(format!("Update model #{id} across all scenes and prefabs."));
                 }
                 if let Some(editor) = &mut dialog.presentation {
                     let aspect = if self.scene.application.orientation == Orientation::Portrait {
@@ -2375,6 +2435,9 @@ impl Editor {
         if let Some(window) = window {
             ctx.memory_mut(|memory| memory.set_modal_layer(window.response.layer_id));
         }
+        if self.dialog.is_some() {
+            return;
+        }
         if submit {
             match self.perform(&dialog) {
                 Ok(message) => {
@@ -2415,6 +2478,23 @@ impl Editor {
                     .color_shader
                     .clone_from(&dialog.shader_source);
                 Ok("Scene color shader applied".into())
+            }
+            Action::Reimport(id) => {
+                let open = self.project.as_mut().ok_or("Open a project first.")?;
+                let mut candidate = open.snapshot(&self.scene)?;
+                candidate.reimport_model(id, import::model(path)?)?;
+                let scene = candidate.scene(&open.active)?;
+                open.project = candidate;
+                self.prepared = PreparedScene::new(&scene);
+                self.scene = scene;
+                self.project_dirty = true;
+                // Scene undo cannot reverse a change to the whole project library.
+                self.history = project::History::default();
+                self.scene_epoch += 1;
+                self.pointer_edit = false;
+                Ok(format!(
+                    "Reimported model #{id} · save the project to keep the replacement"
+                ))
             }
             Action::AssetUsage => Ok("Asset usage closed".into()),
             Action::New => {
@@ -2816,7 +2896,7 @@ fn panel_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(PANEL)
         .stroke(egui::Stroke::new(1.0_f32, LINE))
-        .inner_margin(12.)
+        .inner_margin(8.)
 }
 
 fn section(ui: &mut egui::Ui, text: &str) {

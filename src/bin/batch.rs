@@ -1,7 +1,7 @@
 use forge3d::{
     compatibility, export,
     game::Game,
-    jobs,
+    import, jobs,
     presentation::Presentation,
     project,
     runtime::Scene,
@@ -85,6 +85,18 @@ fn run() -> Result<(), String> {
         (Some("project-add"), [_, path, id, source]) => change_project(path, |project| {
             project.add_scene(text(id)?, &project::load(Path::new(source))?)
         }),
+        (Some("project-models"), [_, path]) => {
+            for (id, model) in Project::load(Path::new(path))?.models() {
+                println!("{id}\t{}", model.name);
+            }
+            Ok(())
+        }
+        (Some("project-reimport"), [_, path, id, source]) => change_project(path, |project| {
+            let id = text(id)?
+                .parse()
+                .map_err(|_| "Expected a numeric model ID.")?;
+            project.reimport_model(id, import::model(Path::new(source))?)
+        }),
         (Some("project-list"), [_, path]) => {
             let project = Project::load(Path::new(path))?;
             println!("Start: {}", project.start());
@@ -127,6 +139,7 @@ fn run() -> Result<(), String> {
   demo SCENE | migrate INPUT OUTPUT
   campaign-demo PROJECT | project-demo PROJECT | project-new SCENE PROJECT
   project-add PROJECT ID SCENE | project-ui PROJECT ID UI_JSON
+  project-models PROJECT | project-reimport PROJECT MODEL_ID MODEL_FILE
   project-list PROJECT | project-start PROJECT ID
   prefab-create PROJECT PREFAB SCENE_ID OBJECT_ID | prefab-insert PROJECT PREFAB SCENE_ID
   export SCENE_OR_PROJECT DIRECTORY | build SCENE_OR_PROJECT DIRECTORY PROFILE [TARGET]

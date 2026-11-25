@@ -67,7 +67,7 @@ impl Project {
         first.application.title = "Forge3D · Two Workshops".into();
         first.application.identifier = "com.forge3d.betademo".into();
         first.application.version = env!("CARGO_PKG_VERSION").into();
-        first.application.version_code = 110;
+        first.application.version_code = 111;
         first.objects[0].script = Some(
             r#"fn update(object, dt, input) {
                 if input.x > 0.5 { object.next_scene = "workshop"; }
@@ -310,6 +310,33 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
 
     pub fn scripts(&self) -> &BTreeMap<AssetId, ScriptAsset> {
         &self.scripts
+    }
+
+    pub fn reimport_model(&mut self, id: AssetId, mut replacement: Model) -> Result<(), String> {
+        let old = self
+            .models
+            .get(&id)
+            .ok_or_else(|| format!("Unknown shared model {id}."))?;
+        replacement.name.clone_from(&old.name);
+        // Project storage interns identical models. Keep two existing IDs distinguishable.
+        if let Some((other, _)) = self
+            .models
+            .iter()
+            .find(|(key, model)| **key != id && **model == replacement)
+        {
+            return Err(format!(
+                "This model would be identical to shared model #{other}."
+            ));
+        }
+        let mut probe = Scene::empty();
+        probe.models.push(replacement.clone());
+        probe.validate()?;
+        let old = self.models.insert(id, replacement).expect("existing model");
+        if let Err(error) = self.validate() {
+            self.models.insert(id, old);
+            return Err(format!("Cannot reimport model #{id}: {error}"));
+        }
+        Ok(())
     }
 
     pub fn use_model(&self, id: AssetId, scene: &mut Scene) -> Result<usize, String> {

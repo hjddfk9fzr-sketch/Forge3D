@@ -1,6 +1,6 @@
 [package]
 name = "forge3d"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 default-run = "forge3d"
 

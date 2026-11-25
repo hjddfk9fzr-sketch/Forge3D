@@ -8,6 +8,61 @@ use macroquad::prelude::Vec2;
 use std::{fs, path::Path, process::Command};
 
 #[test]
+fn reimport_updates_shared_geometry_in_scenes_and_prefabs_and_rolls_back_incompatible_replacements()
+{
+    use forge3d::{import, workspace::OpenProject};
+    let fixture = |name: &str| Path::new("tests/fixtures").join(name);
+    let mut scene = Scene::empty();
+    scene
+        .models
+        .push(import::model(&fixture("model-ascii.fbx")).unwrap());
+    let root = scene
+        .add_object(Object::new("Door", Shape::Model(0)))
+        .unwrap();
+    let mut project = Project::new("first", &scene).unwrap();
+    project.add_scene("second", &scene).unwrap();
+    project.create_prefab("door", &scene, root).unwrap();
+    let id = *project.models().keys().next().unwrap();
+    let mut open = OpenProject::open(project);
+    scene.objects[0].position = [2., 3., 4.];
+    open.project = open.snapshot(&scene).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.forge-project.json");
+    open.project.save(&path, false).unwrap();
+    let cli = Command::new(env!("CARGO_BIN_EXE_forge3d-batch"))
+        .arg("project-reimport")
+        .arg(&path)
+        .arg(id.to_string())
+        .arg(fixture("model-binary.fbx"))
+        .output()
+        .unwrap();
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    let loaded = Project::load(&path).unwrap();
+    let mut expected = import::model(&fixture("model-binary.fbx")).unwrap();
+    expected.name.clone_from(&scene.models[0].name);
+    assert_eq!(loaded.models()[&id], expected);
+    assert_eq!(loaded.models().len(), 1);
+    assert_eq!(loaded.model_usages(id), open.project.model_usages(id));
+    for name in ["first", "second"] {
+        assert_eq!(loaded.scene(name).unwrap().models[0], expected);
+    }
+    assert_eq!(loaded.scene("first").unwrap().objects[0], scene.objects[0]);
+    let mut fresh = Scene::empty();
+    loaded.instantiate("door", &mut fresh, None).unwrap();
+    assert_eq!(fresh.models[0], expected);
+    // The existing animation player needs a clip absent from the replacement.
+    let animated = Scene::rendering_demo();
+    let mut project = Project::new("animated", &animated).unwrap();
+    let id = *project.models().keys().next().unwrap();
+    assert!(project.reimport_model(id, expected).is_err());
+    assert_eq!(project.scene("animated").unwrap(), animated);
+}
+
+#[test]
 fn model_usage_tracks_objects_by_asset_id_across_scenes_prefabs_and_reload() {
     use forge3d::workspace::{ModelOwner, ModelUsage, OpenProject};
 
