@@ -13,6 +13,25 @@ use std::{
     io::{BufReader, Cursor},
 };
 
+pub fn script(path: &Path) -> Result<crate::runtime::ScriptAsset, String> {
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rhai"))
+    {
+        return Err("Choose a .rhai file.".into());
+    }
+    let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    crate::scripting::validate_source(&source)?;
+    Ok(crate::runtime::ScriptAsset {
+        name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        source,
+    })
+}
+
 pub fn model(path: &Path) -> Result<Model, String> {
     import_model(path, None)
 }
@@ -60,16 +79,42 @@ fn import_model(path: &Path, root: Option<&Path>) -> Result<Model, String> {
 fn obj(path: &Path, root: Option<&Path>) -> Result<Vec<Part>, String> {
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
     let file = File::open(path).map_err(|error| error.to_string())?;
+    let material_error = std::cell::RefCell::new(None);
     let (objects, materials) = tobj::load_obj_buf(
         &mut BufReader::new(file),
         &tobj::GPU_LOAD_OPTIONS,
         |material| {
-            let path = read_path(&directory.join(material), root)
-                .map_err(|_| tobj::LoadError::OpenFileFailed)?;
-            tobj::load_mtl(path)
+            let requested = directory.join(material);
+            let loaded = read_path(&requested, root)
+                .and_then(|path| tobj::load_mtl(path).map_err(|e| e.to_string()));
+            match loaded {
+                Ok((mut materials, names)) => {
+                    // OBJ texture names are relative to the material library.
+                    for mat in &mut materials {
+                        if let Some(name) = mat.diffuse_texture.as_mut().filter(|n| !n.is_empty()) {
+                            let relative = material.parent().unwrap_or(Path::new("")).join(&*name);
+                            // Older projects also place textures beside the OBJ.
+                            if directory.join(&relative).is_file()
+                                || !directory.join(&*name).is_file()
+                            {
+                                *name = relative.to_string_lossy().into_owned();
+                            }
+                        }
+                    }
+                    Ok((materials, names))
+                }
+                Err(error) => {
+                    *material_error.borrow_mut() =
+                        Some(format!("{}: {error}", requested.display()));
+                    Err(tobj::LoadError::OpenFileFailed)
+                }
+            }
         },
     )
     .map_err(|error| error.to_string())?;
+    if let Some(error) = material_error.into_inner() {
+        return Err(error);
+    }
     let materials = materials.map_err(|error| format!("OBJ materials: {error}"))?;
     objects
         .into_iter()
@@ -148,7 +193,13 @@ fn gltf_parts(path: &Path, root: Option<&Path>) -> Result<(Vec<Part>, Option<Rig
             if uri.contains(':') || Path::new(relative.as_ref()).is_absolute() {
                 return Err("Use a relative glTF resource path inside the project root.".into());
             }
-            read_path(&directory.join(relative.as_ref()), root)?;
+            read_path(&directory.join(relative.as_ref()), root)
+                .map_err(|e| format!("glTF resource '{uri}': {e}"))?;
+        } else if !uri.contains(':') && !directory.join(relative.as_ref()).is_file() {
+            return Err(format!(
+                "Missing glTF resource '{uri}' referenced by {}.",
+                path.display()
+            ));
         }
     }
     let buffers = gltf::import_buffers(&document, Some(directory), blob)

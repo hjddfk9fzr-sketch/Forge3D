@@ -11,10 +11,19 @@ pub const EXTENSION: &str = ".forge-project.json";
 pub const PROJECT_SCHEMA_VERSION: u32 = 1;
 pub type AssetId = u64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SharedAsset {
     Model(AssetId),
     Script(AssetId),
+}
+
+impl std::fmt::Display for SharedAsset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Model(id) => write!(f, "model #{id}"),
+            Self::Script(id) => write!(f, "script #{id}"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -67,7 +76,7 @@ impl Project {
         first.application.title = "Forge3D · Two Workshops".into();
         first.application.identifier = "com.forge3d.betademo".into();
         first.application.version = env!("CARGO_PKG_VERSION").into();
-        first.application.version_code = 111;
+        first.application.version_code = 112;
         first.objects[0].script = Some(
             r#"fn update(object, dt, input) {
                 if input.x > 0.5 { object.next_scene = "workshop"; }
@@ -238,6 +247,45 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
         if !self.scenes.contains_key(&self.start) {
             return Err(format!("Missing starting scene {}.", self.start));
         }
+        let mut missing = Vec::new();
+        for (kind, entries) in [("scene", &self.scenes), ("prefab", &self.prefabs)] {
+            for (owner, stored) in entries {
+                for (asset, ids) in [("model", &stored.models), ("script", &stored.scripts)] {
+                    for (slot, id) in ids.iter().enumerate() {
+                        let exists = if asset == "model" {
+                            self.models.contains_key(id)
+                        } else {
+                            self.scripts.contains_key(id)
+                        };
+                        if !exists {
+                            missing.push(format!(
+                                "{kind} '{owner}': missing {asset} #{id} at slot {slot}"
+                            ));
+                        }
+                    }
+                }
+                for obj in &stored.scene.objects {
+                    let model = match obj.shape {
+                        Shape::Model(i) => Some(i),
+                        _ => None,
+                    };
+                    for (asset, slot, count) in [
+                        ("model", model, stored.models.len()),
+                        ("script", obj.script_asset, stored.scripts.len()),
+                    ] {
+                        if let Some(slot) = slot.filter(|i| *i >= count) {
+                            missing.push(format!(
+                                "{kind} '{owner}', object '{}' #{}: missing {asset} slot {slot}",
+                                obj.name, obj.id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if !missing.is_empty() {
+            return Err(missing.join("\n"));
+        }
         for (id, scene) in self.scenes.iter().chain(&self.prefabs) {
             check_id(id)?;
             self.expand(scene)?;
@@ -275,6 +323,37 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
         self.asset_usages(SharedAsset::Model(id))
     }
 
+    pub fn dependencies(&self, owner: ModelOwner<'_>) -> Result<Vec<(SharedAsset, &str)>, String> {
+        let stored = match owner {
+            ModelOwner::Scene(id) => self
+                .scenes
+                .get(id)
+                .ok_or_else(|| format!("Unknown scene '{id}'."))?,
+            ModelOwner::Prefab(id) => self
+                .prefabs
+                .get(id)
+                .ok_or_else(|| format!("Unknown prefab '{id}'."))?,
+        };
+        let mut assets = Vec::new();
+        for id in &stored.models {
+            let name = self
+                .models
+                .get(id)
+                .ok_or_else(|| format!("Missing model #{id}."))?;
+            assets.push((SharedAsset::Model(*id), name.name.as_str()));
+        }
+        for id in &stored.scripts {
+            let name = self
+                .scripts
+                .get(id)
+                .ok_or_else(|| format!("Missing script #{id}."))?;
+            assets.push((SharedAsset::Script(*id), name.name.as_str()));
+        }
+        assets.sort_by_key(|(asset, _)| *asset);
+        assets.dedup();
+        Ok(assets)
+    }
+
     pub fn asset_usages(&self, asset: SharedAsset) -> Vec<ModelUsage<'_>> {
         let mut usages = Vec::new();
         for (entries, prefab) in [(&self.scenes, false), (&self.prefabs, true)] {
@@ -310,6 +389,75 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
 
     pub fn scripts(&self) -> &BTreeMap<AssetId, ScriptAsset> {
         &self.scripts
+    }
+
+    /// Adds a batch to the project library, committing only after every file imports.
+    pub fn import_assets(
+        &mut self,
+        paths: &[std::path::PathBuf],
+    ) -> Result<Vec<SharedAsset>, String> {
+        if paths.is_empty() {
+            return Err("Choose at least one asset file.".into());
+        }
+        let mut models = self.models.clone();
+        let mut scripts = self.scripts.clone();
+        let mut imported = Vec::with_capacity(paths.len());
+        for path in paths {
+            let asset = if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("rhai"))
+            {
+                crate::import::script(path)
+                    .and_then(|value| intern(&mut scripts, value))
+                    .map(SharedAsset::Script)
+            } else {
+                crate::import::model(path)
+                    .and_then(|value| {
+                        let mut probe = Scene::empty();
+                        probe.models.push(value.clone());
+                        probe.validate()?;
+                        intern(&mut models, value)
+                    })
+                    .map(SharedAsset::Model)
+            }
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+            imported.push(asset);
+        }
+        self.models = models;
+        self.scripts = scripts;
+        Ok(imported)
+    }
+
+    pub fn reimport_script(&mut self, id: AssetId, source: String) -> Result<(), String> {
+        let old = self
+            .scripts
+            .get(&id)
+            .ok_or_else(|| format!("Unknown shared script {id}."))?;
+        crate::scripting::validate_source(&source)?;
+        let replacement = ScriptAsset {
+            name: old.name.clone(),
+            source,
+        };
+        if let Some((other, _)) = self
+            .scripts
+            .iter()
+            .find(|(key, value)| **key != id && **value == replacement)
+        {
+            return Err(format!(
+                "This script would be identical to shared script #{other}."
+            ));
+        }
+        self.scripts.insert(id, replacement);
+        Ok(())
+    }
+
+    pub fn reimport_asset(&mut self, asset: SharedAsset, path: &Path) -> Result<(), String> {
+        match asset {
+            SharedAsset::Model(id) => self.reimport_model(id, crate::import::model(path)?),
+            SharedAsset::Script(id) => {
+                self.reimport_script(id, crate::import::script(path)?.source)
+            }
+        }
     }
 
     pub fn reimport_model(&mut self, id: AssetId, mut replacement: Model) -> Result<(), String> {

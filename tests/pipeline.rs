@@ -54,6 +54,33 @@ fn obj_resources_round_trip_into_a_standalone_game() {
 }
 
 #[test]
+fn obj_reports_missing_material_and_resolves_textures_relative_to_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let materials = temp.path().join("materials");
+    fs::create_dir(&materials).unwrap();
+    let obj = temp.path().join("triangle.obj");
+    fs::write(
+        &obj,
+        "mtllib materials/paint.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl Paint\nf 1 2 3\n",
+    )
+    .unwrap();
+    let error = import::model(&obj).unwrap_err();
+    assert!(error.contains("paint.mtl"), "{error}");
+    fs::write(
+        materials.join("paint.mtl"),
+        "newmtl Paint\nmap_Kd paint.png\n",
+    )
+    .unwrap();
+    let error = import::model(&obj).unwrap_err();
+    assert!(error.contains("paint.png"), "{error}");
+    let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 50, 90, 255]));
+    image.save(materials.join("paint.png")).unwrap();
+    assert!(import::model(&obj).unwrap().parts[0].texture.is_some());
+    fs::rename(materials.join("paint.png"), temp.path().join("paint.png")).unwrap();
+    assert!(import::model(&obj).unwrap().parts[0].texture.is_some());
+}
+
+#[test]
 fn gltf_and_glb_preserve_node_transforms() {
     let temp = tempfile::tempdir().unwrap();
     let positions: Vec<u8> = [0_f32, 0., 0., 1., 0., 0., 0., 1., 0.]
@@ -90,6 +117,8 @@ fn gltf_and_glb_preserve_node_transforms() {
 
     document["buffers"][0]["uri"] = json!("triangle.bin");
     fs::write(temp.path().join("triangle.gltf"), document.to_string()).unwrap();
+    let missing = import::model(&temp.path().join("triangle.gltf")).unwrap_err();
+    assert!(missing.contains("triangle.bin"), "{missing}");
     fs::write(temp.path().join("triangle.bin"), positions).unwrap();
 
     for file in ["triangle.gltf", "triangle.glb"] {

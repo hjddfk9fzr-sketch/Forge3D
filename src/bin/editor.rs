@@ -126,7 +126,9 @@ enum Action {
     PrefabCreate,
     AssetUsage,
     ColorShader,
-    Reimport(u64),
+    Reimport(SharedAsset),
+    BatchImport,
+    Dependencies,
 }
 
 impl Action {
@@ -151,7 +153,10 @@ impl Action {
             Self::Script => "Script Editor",
             Self::ProjectSave => "Save project",
             Self::ProjectAdd => "Add scene to project",
-            Self::Reimport(_) => "Reimport model",
+            Self::BatchImport => "Batch import",
+            Self::Dependencies => "Dependencies",
+            Self::Reimport(SharedAsset::Model(_)) => "Reimport model",
+            Self::Reimport(SharedAsset::Script(_)) => "Reimport script",
             Self::ColorShader => "Scene color shader",
             Self::AssetUsage => "Where used",
             Self::PrefabCreate => "Create prefab",
@@ -163,7 +168,10 @@ impl Action {
             Self::ColorShader => {
                 "GLSL function body · vec3 forge_color(vec3 rgb, vec2 uv, float time)"
             }
-            Self::Reimport(_) => "Replacement model file (.obj, .fbx, .gltf or .glb)",
+            Self::BatchImport => "Choose files below or enter one path per line. Relative paths use the displayed directory.",
+            Self::Dependencies => "Shared assets embedded in the selected scene or prefab.",
+            Self::Reimport(SharedAsset::Script(_)) => "Replacement .rhai file",
+            Self::Reimport(SharedAsset::Model(_)) => "Replacement model file (.obj, .fbx, .gltf or .glb)",
             Self::AssetUsage => "Select a model or shared script to see the objects that use it.",
             Self::New => "Create an empty scene",
             Self::PhysicsDemo => "Load the Physics Workshop scene",
@@ -205,10 +213,89 @@ fn asset_usage_rows(project: &Project, asset: SharedAsset) -> Vec<String> {
         .collect()
 }
 
+fn batch_import_fields(ui: &mut egui::Ui, browser: &Browser, paths: &mut String) {
+    ui.label(browser.directory.display().to_string());
+    egui::ScrollArea::vertical()
+        .max_height(125.)
+        .show(ui, |ui| {
+            for entry in browser
+                .entries
+                .iter()
+                .filter(|e| matches!(e.kind, "model" | "script"))
+            {
+                let mut selected = paths.lines().any(|line| line == entry.name);
+                if ui.checkbox(&mut selected, &entry.name).changed() {
+                    let mut lines: Vec<_> = paths.lines().filter(|l| *l != entry.name).collect();
+                    if selected {
+                        lines.push(&entry.name);
+                    }
+                    *paths = lines.join("\n");
+                }
+            }
+        });
+    ui.add(
+        egui::TextEdit::multiline(paths)
+            .desired_rows(4)
+            .desired_width(420.),
+    );
+}
+
+fn dependency_list(ui: &mut egui::Ui, project: &Project, prefab: &mut bool, owner_id: &mut String) {
+    egui::ComboBox::from_id_salt("dependency-owner")
+        .selected_text(format!(
+            "{} · {}",
+            if *prefab { "Prefab" } else { "Scene" },
+            *owner_id
+        ))
+        .show_ui(ui, |ui| {
+            for (is_prefab, id) in project
+                .scenes()
+                .map(|(id, _)| (false, id))
+                .chain(project.prefabs().map(|id| (true, id)))
+            {
+                let kind = if is_prefab { "Prefab" } else { "Scene" };
+                if ui
+                    .selectable_label(
+                        *prefab == is_prefab && *owner_id == id,
+                        format!("{kind} · {id}"),
+                    )
+                    .clicked()
+                {
+                    *prefab = is_prefab;
+                    *owner_id = id.to_owned();
+                }
+            }
+        });
+    let owner = if *prefab {
+        ModelOwner::Prefab(owner_id)
+    } else {
+        ModelOwner::Scene(owner_id)
+    };
+    match project.dependencies(owner) {
+        Ok(items) if items.is_empty() => {
+            ui.label("No shared assets.");
+        }
+        Ok(items) => {
+            egui::ScrollArea::vertical()
+                .max_height(300.)
+                .show(ui, |ui| {
+                    for (asset, name) in items {
+                        ui.label(format!("{asset} · {name}"));
+                    }
+                });
+        }
+        Err(error) => {
+            ui.colored_label(Color32::LIGHT_RED, error);
+        }
+    }
+}
+
 struct Dialog {
     action: Action,
     path: String,
     scene_id: String,
+    dependencies: Option<Project>,
+    prefab_dependencies: bool,
     shader_source: String,
     presentation: Option<UiDesigner>,
     script: Option<ScriptEditor>,
@@ -1298,6 +1385,21 @@ impl Editor {
                 if ui.small_button("Import model…").clicked() {
                     self.prompt(Action::Import);
                 }
+                if self.project.is_some() {
+                    if ui.small_button("Batch import…").clicked() {
+                        self.prompt(Action::BatchImport);
+                    }
+                    if ui.small_button("Dependencies…").clicked() {
+                        self.prompt(Action::Dependencies);
+                        if let (Some(open), Some(dialog)) = (&self.project, &mut self.dialog) {
+                            dialog.scene_id.clone_from(&open.active);
+                            match open.snapshot(&self.scene) {
+                                Ok(project) => dialog.dependencies = Some(project),
+                                Err(error) => dialog.error = Some(error),
+                            }
+                        }
+                    }
+                }
                 let has_assets = !self.scene.models.is_empty()
                     || !self.scene.scripts.is_empty()
                     || self.project.as_ref().is_some_and(|open| {
@@ -2210,6 +2312,7 @@ impl Editor {
             | Action::CampaignDemo
             | Action::Presentation
             | Action::ColorShader
+            | Action::Dependencies
             | Action::AssetUsage
             | Action::Script
             | Action::ProjectAdd => Path::new(""),
@@ -2217,7 +2320,9 @@ impl Editor {
                 .path
                 .as_deref()
                 .unwrap_or(Path::new("scene.forge.json")),
-            Action::Import | Action::ImportScript | Action::Reimport(_) => Path::new(""),
+            Action::BatchImport | Action::Import | Action::ImportScript | Action::Reimport(_) => {
+                Path::new("")
+            }
             Action::Export => Path::new("game-export"),
             Action::Build => Path::new("game-build"),
             Action::RetryBuild => Path::new("game-build-retry"),
@@ -2233,6 +2338,8 @@ impl Editor {
             action,
             path: path.display().to_string(),
             scene_id: String::new(),
+            dependencies: None,
+            prefab_dependencies: false,
             shader_source: if matches!(action, Action::ColorShader) {
                 self.scene.lighting.color_shader.clone()
             } else {
@@ -2288,10 +2395,15 @@ impl Editor {
                         | Action::CampaignDemo
                         | Action::Presentation
                         | Action::ColorShader
+                        | Action::Dependencies
                         | Action::AssetUsage
                         | Action::Script
                 ) {
-                    ui.add(egui::TextEdit::singleline(&mut dialog.path).desired_width(420.));
+                    if matches!(dialog.action, Action::BatchImport) {
+                        batch_import_fields(ui, &self.browser, &mut dialog.path);
+                    } else {
+                        ui.add(egui::TextEdit::singleline(&mut dialog.path).desired_width(420.));
+                    }
                 }
                 if matches!(dialog.action, Action::ColorShader) {
                     ui.add(
@@ -2304,6 +2416,9 @@ impl Editor {
                         dialog.shader_source = lighting::PULSE_SHADER.into();
                     }
                     ui.label("Enable Use scene color shader on the object's material. An empty shader uses the standard color.");
+                }
+                if let Some(project) = &dialog.dependencies {
+                    dependency_list(ui, project, &mut dialog.prefab_dependencies, &mut dialog.scene_id);
                 }
                 if let Some((project, selected, rows)) = &mut dialog.usage {
                     let before = *selected;
@@ -2323,10 +2438,9 @@ impl Editor {
                     if *selected != before {
                         *rows = asset_usage_rows(project, *selected);
                     }
-                    if let SharedAsset::Model(id) = *selected {
-                        if self.project.is_some() && ui.button("Reimport model…").clicked() {
-                            self.prompt(Action::Reimport(id));
-                        }
+                    let action = Action::Reimport(*selected);
+                    if self.project.is_some() && ui.button(format!("{}…", action.label())).clicked() {
+                        self.prompt(action);
                     }
                     if rows.is_empty() {
                         ui.label("Not used in this project.");
@@ -2341,7 +2455,7 @@ impl Editor {
                     }
                 }
                 if let Action::Reimport(id) = dialog.action {
-                    ui.label(format!("Update model #{id} across all scenes and prefabs."));
+                    ui.label(format!("Update {id} across all scenes and prefabs."));
                 }
                 if let Some(editor) = &mut dialog.presentation {
                     let aspect = if self.scene.application.orientation == Orientation::Portrait {
@@ -2420,7 +2534,7 @@ impl Editor {
                 submit = ui
                     .button(if discarding {
                         "Discard changes and continue"
-                    } else if matches!(dialog.action, Action::AssetUsage) {
+                    } else if matches!(dialog.action, Action::AssetUsage | Action::Dependencies) {
                         "Close"
                     } else if matches!(
                         dialog.action,
@@ -2463,6 +2577,7 @@ impl Editor {
                 | Action::CampaignDemo
                 | Action::Presentation
                 | Action::ColorShader
+                | Action::Dependencies
                 | Action::AssetUsage
                 | Action::Script
                 | Action::ProjectAdd
@@ -2479,10 +2594,29 @@ impl Editor {
                     .clone_from(&dialog.shader_source);
                 Ok("Scene color shader applied".into())
             }
+            Action::Dependencies => Ok("Dependencies closed".into()),
+            Action::BatchImport => {
+                let paths: Vec<_> = dialog
+                    .path
+                    .lines()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(|p| self.browser.directory.join(p))
+                    .collect();
+                let open = self.project.as_mut().ok_or("Open a project first.")?;
+                let mut candidate = open.snapshot(&self.scene)?;
+                let imported = candidate.import_assets(&paths)?;
+                open.project = candidate;
+                self.project_dirty = true;
+                Ok(format!(
+                    "Imported {} files into Shared assets · save the project to keep them",
+                    imported.len()
+                ))
+            }
             Action::Reimport(id) => {
                 let open = self.project.as_mut().ok_or("Open a project first.")?;
                 let mut candidate = open.snapshot(&self.scene)?;
-                candidate.reimport_model(id, import::model(path)?)?;
+                candidate.reimport_asset(id, path)?;
                 let scene = candidate.scene(&open.active)?;
                 open.project = candidate;
                 self.prepared = PreparedScene::new(&scene);
@@ -2493,7 +2627,7 @@ impl Editor {
                 self.scene_epoch += 1;
                 self.pointer_edit = false;
                 Ok(format!(
-                    "Reimported model #{id} · save the project to keep the replacement"
+                    "Reimported {id} · save the project to keep the replacement"
                 ))
             }
             Action::AssetUsage => Ok("Asset usage closed".into()),
@@ -2643,20 +2777,9 @@ impl Editor {
                 Ok(format!("Imported {name}"))
             }
             Action::ImportScript => {
-                if path.extension().and_then(|value| value.to_str()) != Some("rhai") {
-                    return Err("Choose a .rhai file.".into());
-                }
-                let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
-                scripting::validate_source(&source)?;
-                let name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                self.scene.scripts.push(ScriptAsset {
-                    name: name.clone(),
-                    source,
-                });
+                let script = import::script(path)?;
+                let name = script.name.clone();
+                self.scene.scripts.push(script);
                 Ok(format!("Imported shared script {name}"))
             }
             Action::Build => {

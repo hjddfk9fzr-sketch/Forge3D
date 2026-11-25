@@ -1,11 +1,11 @@
 use forge3d::{
     compatibility, export,
     game::Game,
-    import, jobs,
+    jobs,
     presentation::Presentation,
     project,
     runtime::Scene,
-    workspace::{Project, EXTENSION},
+    workspace::{ModelOwner, Project, SharedAsset, EXTENSION},
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -91,12 +91,67 @@ fn run() -> Result<(), String> {
             }
             Ok(())
         }
+        (Some("project-import"), [_, path, files @ ..]) => {
+            let files: Vec<_> = files.iter().map(std::path::PathBuf::from).collect();
+            let imported = change_project(path, |project| project.import_assets(&files))?;
+            for (file, asset) in files.iter().zip(imported) {
+                println!("{asset}\t{}", file.display());
+            }
+            Ok(())
+        }
+        (Some("project-assets"), [_, path]) => {
+            let project = Project::load(Path::new(path))?;
+            for (id, model) in project.models() {
+                println!("model\t{id}\t{}", model.name);
+            }
+            for (id, script) in project.scripts() {
+                println!("script\t{id}\t{}", script.name);
+            }
+            Ok(())
+        }
+        (Some("project-deps"), [_, path, kind, id]) => {
+            let project = Project::load(Path::new(path))?;
+            let owner = match text(kind)? {
+                "scene" => ModelOwner::Scene(text(id)?),
+                "prefab" => ModelOwner::Prefab(text(id)?),
+                _ => return Err("Choose scene or prefab.".into()),
+            };
+            for (asset, name) in project.dependencies(owner)? {
+                println!("{asset}\t{name}");
+            }
+            Ok(())
+        }
+        (Some("project-uses"), [_, path, kind, id]) => {
+            let project = Project::load(Path::new(path))?;
+            let asset = shared_asset(kind, id)?;
+            let exists = match asset {
+                SharedAsset::Model(id) => project.models().contains_key(&id),
+                SharedAsset::Script(id) => project.scripts().contains_key(&id),
+            };
+            if !exists {
+                return Err(format!("Unknown asset {asset}."));
+            }
+            let rows = project.asset_usages(asset);
+            if rows.is_empty() {
+                println!("Not used in this project.");
+            }
+            for row in rows {
+                let (kind, owner) = match row.owner {
+                    ModelOwner::Scene(n) => ("scene", n),
+                    ModelOwner::Prefab(n) => ("prefab", n),
+                };
+                println!("{kind}\t{owner}\t{}\t{}", row.object_id, row.object_name);
+            }
+            Ok(())
+        }
         (Some("project-reimport"), [_, path, id, source]) => change_project(path, |project| {
-            let id = text(id)?
-                .parse()
-                .map_err(|_| "Expected a numeric model ID.")?;
-            project.reimport_model(id, import::model(Path::new(source))?)
+            project.reimport_asset(shared_asset(OsStr::new("model"), id)?, Path::new(source))
         }),
+        (Some("project-reimport"), [_, path, kind, id, source]) => {
+            change_project(path, |project| {
+                project.reimport_asset(shared_asset(kind, id)?, Path::new(source))
+            })
+        }
         (Some("project-list"), [_, path]) => {
             let project = Project::load(Path::new(path))?;
             println!("Start: {}", project.start());
@@ -139,6 +194,9 @@ fn run() -> Result<(), String> {
   demo SCENE | migrate INPUT OUTPUT
   campaign-demo PROJECT | project-demo PROJECT | project-new SCENE PROJECT
   project-add PROJECT ID SCENE | project-ui PROJECT ID UI_JSON
+  project-import PROJECT FILE... | project-assets PROJECT | project-uses PROJECT model|script ID
+  project-deps PROJECT scene|prefab OWNER_ID
+  project-reimport PROJECT model|script ID FILE
   project-models PROJECT | project-reimport PROJECT MODEL_ID MODEL_FILE
   project-list PROJECT | project-start PROJECT ID
   prefab-create PROJECT PREFAB SCENE_ID OBJECT_ID | prefab-insert PROJECT PREFAB SCENE_ID
@@ -155,20 +213,42 @@ fn text(argument: &OsStr) -> Result<&str, String> {
         .ok_or_else(|| "Expected a text argument.".into())
 }
 
+fn shared_asset(kind: &OsStr, id: &OsStr) -> Result<SharedAsset, String> {
+    let id = text(id)?
+        .parse()
+        .map_err(|_| "Expected a numeric asset ID.")?;
+    match text(kind)? {
+        "model" => Ok(SharedAsset::Model(id)),
+        "script" => Ok(SharedAsset::Script(id)),
+        _ => Err("Choose model or script.".into()),
+    }
+}
+
 fn object_id(argument: &OsStr) -> Result<u64, String> {
     text(argument)?
         .parse()
         .map_err(|_| "Expected a numeric object ID.".into())
 }
 
-fn change_project(
+fn change_project<T>(
     path: &OsStr,
-    change: impl FnOnce(&mut Project) -> Result<(), String>,
-) -> Result<(), String> {
-    let path = Path::new(path);
-    let mut project = Project::load(path)?;
-    change(&mut project)?;
-    project.save(path, true)
+    change: impl FnOnce(&mut Project) -> Result<T, String>,
+) -> Result<T, String> {
+    let path = Path::new(path).canonicalize().map_err(|e| e.to_string())?;
+    // The manifest itself is atomically replaced. Lock a stable sibling while
+    // performing CLI read/modify/write operations in this project directory.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path.with_file_name(".forge3d-write.lock"))
+        .map_err(|e| e.to_string())?;
+    lock.lock().map_err(|e| e.to_string())?;
+    let mut project = Project::load(&path)?;
+    let result = change(&mut project)?;
+    project.save(&path, true)?;
+    Ok(result)
 }
 
 fn load_game(path: &Path) -> Result<Game, String> {
