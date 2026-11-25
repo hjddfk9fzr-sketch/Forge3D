@@ -119,3 +119,7 @@ codex mcp add forge3d --url http://127.0.0.1:7333/mcp
 `scene_settings` принимает частичное обновление `application`, например `{"identifier":"com.studio.game","version":"1.2.0","version_code":12}`. `scene_migrate` принимает `source` и `destination` и записывает отдельную копию в текущей схеме.
 
 `build_game` принимает `android-release` для подписанного APK и `android-bundle` для подписанного AAB. Для настольных профилей можно передать `target` со значением `windows-x64`, `macos-arm64` или `linux-x64`. Параметры подписи Android задаются в окружении MCP-сервера. [Настройки релиза](README.md#экспорт-сборки-и-распространение)
+
+### physics_raycast
+
+`{"origin":[0,1,0],"direction":[0,0,-1],"max_distance":2,"ignore_id":1}` запрашивает ближайший твёрдый коллайдер активной сцены. `ignore_id` необязателен. При `frames: 0` (по умолчанию) проверяется начальная позиция. Параметры `frames`, `dt`, `input` и `controls` работают как в `simulate`. Ответ содержит `frames`, `script_errors` и `hit` со значением `null` при промахе либо полями `object_id` (число), `point`, `normal`, `distance` в мировых координатах.

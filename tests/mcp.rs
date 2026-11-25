@@ -325,4 +325,14 @@ fn mcp_campaign_simulation_exposes_ui_progress_and_sound_events() {
     assert_eq!(result["progress"]["checkpoint"], "workshop");
     assert_eq!(result["sounds"], json!(["cue", "cue", "cue"]));
     assert!(result["script_errors"].as_array().unwrap().is_empty());
+    client.ok("project_select_scene", json!({"scene":"entrance"}));
+    let query = json!({"origin":[0,1.2,0],"direction":[0,0,-2],"max_distance":2});
+    let closed = client.ok("physics_raycast", query.clone());
+    assert!(closed["hit"]["object_id"].is_u64());
+    let mut activate = query;
+    activate["frames"] = json!(1);
+    activate["controls"] = json!({"pressed":["e"]});
+    let opened = client.ok("physics_raycast", activate);
+    assert_eq!(opened["script_errors"], json!([]));
+    assert!(opened["hit"].is_null());
 }

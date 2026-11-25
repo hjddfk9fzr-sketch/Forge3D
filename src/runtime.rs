@@ -100,6 +100,8 @@ impl View {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Object {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub components: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<Player>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,6 +150,7 @@ impl Object {
             surface: None,
             light: None,
             cast_shadows: true,
+            components: Default::default(),
             body: None,
             id: 0,
             parent: None,
@@ -881,6 +884,10 @@ impl PreparedScene {
     }
 
     pub fn draw(&mut self, scene: &Scene, camera: &Camera3D, grid: bool, selected: Option<usize>) {
+        for model in scene.models.iter().skip(self.models.len()) {
+            self.models
+                .push(model.parts.iter().map(prepare_part).collect());
+        }
         let world = scene.world_transforms();
         let poses: Vec<_> = scene
             .objects
@@ -1224,7 +1231,7 @@ pub struct Playback {
     scene: Scene,
     scripts: Scripts,
     script_errors: Vec<String>,
-    physics: Option<Physics>,
+    physics: physics::World,
     accumulated: f64,
     pending_controls: InputControls,
     events: Vec<Event>,
@@ -1238,13 +1245,10 @@ impl Playback {
         let mut scripts = Scripts::compile(&scene)?;
         let mut script_errors = Vec::new();
         scripts.start(&mut scene, &mut script_errors);
-        let physics = Physics::new(&scene)?;
-        scripts.camera(
-            &mut scene,
-            &input_map(Vec2::ZERO, &InputControls::default()),
-            0.,
-            &mut script_errors,
-        );
+        let physics = physics::World::new(std::cell::RefCell::new(Physics::new(&scene)?));
+        scripts.bind_physics(physics.clone());
+        let initial_input = input_map(Vec2::ZERO, &InputControls::default(), &scene.camera);
+        scripts.camera(&mut scene, &initial_input, 0., &mut script_errors);
         Ok(Self {
             scene,
             scripts,
@@ -1261,6 +1265,48 @@ impl Playback {
         &self.scene
     }
 
+    pub(crate) fn commit_objects(&mut self, mut next: Scene) -> Result<(), String> {
+        next.validate_objects()?;
+        // Commands preserve the order of surviving objects and append new IDs.
+        let first = next
+            .objects
+            .iter()
+            .position(|o| o.id >= self.scene.next_id)
+            .unwrap_or(next.objects.len());
+        let added = if first < next.objects.len() {
+            let mut scripts = Scripts::compile(&next)?;
+            scripts.bind_physics(self.physics.clone());
+            scripts.start_added(first, &mut next, &mut self.script_errors);
+            Some(scripts)
+        } else {
+            None
+        };
+        let mut physics = self.physics.borrow_mut();
+        if !next.objects.iter().any(|o| o.body.is_some()) {
+            *physics = None;
+        } else if let Some(world) = physics.as_mut() {
+            world.sync(&next)?;
+        } else {
+            *physics = Physics::new(&next)?;
+        }
+        self.scripts.retain_existing(&self.scene, &next);
+        if let Some(scripts) = added {
+            self.scripts.merge(scripts);
+        }
+        self.scene = next;
+        Ok(())
+    }
+
+    pub fn raycast(
+        &self,
+        origin: [f32; 3],
+        direction: [f32; 3],
+        distance: f32,
+        ignore: Option<u64>,
+    ) -> Result<Option<physics::RayHit>, String> {
+        Physics::raycast(&self.physics, origin, direction, distance, ignore)
+    }
+
     pub fn tick(&mut self, movement: Vec2, dt: f32) {
         self.tick_input(movement, &InputControls::default(), dt)
     }
@@ -1271,8 +1317,12 @@ impl Playback {
         } else {
             0.
         };
-        if self.physics.is_none() {
-            self.run_step(movement, &input_map(movement, controls), dt);
+        if self.physics.borrow().is_none() {
+            self.run_step(
+                movement,
+                &input_map(movement, controls, &self.scene.camera),
+                dt,
+            );
             return;
         }
         self.pending_controls.accumulate(controls);
@@ -1280,7 +1330,7 @@ impl Playback {
         let step = f64::from(physics::STEP);
         while self.accumulated + 1e-8 >= step {
             self.accumulated = (self.accumulated - step).max(0.);
-            let input = input_map(movement, &self.pending_controls);
+            let input = input_map(movement, &self.pending_controls, &self.scene.camera);
             self.pending_controls.clear_edges();
             self.run_step(movement, &input, physics::STEP);
         }
@@ -1290,8 +1340,12 @@ impl Playback {
         update(&mut self.scene, movement, dt);
         self.scripts
             .step(&mut self.scene, input, dt, &mut self.script_errors);
-        if let Some(physics) = &mut self.physics {
-            let events = physics.step(&mut self.scene, movement);
+        let events = self
+            .physics
+            .borrow_mut()
+            .as_mut()
+            .map(|physics| physics.step(&mut self.scene, movement));
+        if let Some(events) = events {
             self.scripts
                 .events(&mut self.scene, &events, &mut self.script_errors);
             let preserved = events.len().min(4096 - self.events.len());

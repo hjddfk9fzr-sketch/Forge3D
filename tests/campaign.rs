@@ -85,3 +85,125 @@ fn overlay_rejects_malformed_media_and_overridden_keyboard_actions() {
         assert!(presentation.validate().is_err());
     }
 }
+
+#[test]
+fn workshop_door_needs_clear_aim_and_reach() {
+    use forge3d::{
+        controls::{InputControls, Key},
+        physics::{Body, STEP},
+        runtime::{Object, Playback, Shape},
+    };
+    let entrance = Project::campaign_demo().unwrap().scene("entrance").unwrap();
+    for case in ["near", "button", "far", "blocked", "looking away"] {
+        let mut scene = entrance.clone();
+        let door = scene
+            .objects
+            .iter()
+            .position(|o| o.name == "Workshop door")
+            .unwrap();
+        if case == "far" {
+            scene.objects[door].position[2] = -5.;
+        }
+        if case == "blocked" {
+            let mut wall = Object::new("Wall", Shape::Cube);
+            wall.position = [0., 1., -1.];
+            wall.body = Some(Body::default());
+            scene.add_object(wall).unwrap();
+        }
+        let mut play = Playback::new(scene).unwrap();
+        let mut controls = InputControls::default();
+        if case == "looking away" {
+            controls.keys.insert(Key::Q);
+            play.tick_input(Vec2::ZERO, &controls, STEP);
+        }
+        if case == "button" {
+            play.ui_action("use").unwrap();
+        } else {
+            controls.pressed.insert(Key::E);
+        }
+        play.tick_input(Vec2::ZERO, &controls, STEP);
+        let errors = play.take_script_errors();
+        assert!(errors.is_empty(), "{case}: {errors:?}");
+        let open = matches!(case, "near" | "button");
+        assert_eq!(play.scene().objects[door].position[1] > 3., open, "{case}");
+        if open {
+            assert!(play
+                .raycast([0., 1.2, 0.], [0., 0., -1.], 2., None)
+                .unwrap()
+                .is_none());
+        }
+    }
+}
+
+#[test]
+fn runtime_prefab_pickup_survives_export_and_leaves_no_body_or_script() {
+    use forge3d::physics::STEP;
+    let project = Project::campaign_demo().unwrap();
+    let game = project.game(Some("entrance")).unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let dir = destination.path().join("game");
+    export::collection(&game, &dir).unwrap();
+    let decoded = Game::decode(
+        &fs::read(dir.join("assets/scene.json")).unwrap(),
+        Some(&fs::read(dir.join("assets/scenes.json")).unwrap()),
+    )
+    .unwrap();
+    for game in [game, decoded] {
+        let mut play = GamePlayback::new(game).unwrap();
+        play.tick(Vec2::ZERO, STEP);
+        let item = play
+            .scene()
+            .objects
+            .iter()
+            .find(|o| o.name == "Workshop token")
+            .unwrap()
+            .id;
+        let ray = |p: &GamePlayback| p.raycast([1.25, 2., 0.], [0., -1., 0.], 2., None).unwrap();
+        assert_eq!(ray(&play).unwrap().object_id, item);
+        play.tick(Vec2::ZERO, STEP);
+        assert!(play.scene().objects[play.scene().object_index(item).unwrap()].rotation[1] > 0.);
+        for _ in 0..24 {
+            play.tick(Vec2::X, STEP);
+        }
+        assert!(play.scene().object_index(item).is_err());
+        assert!(ray(&play).is_none_or(|hit| hit.object_id != item));
+        assert_eq!(play.scene().objects[0].components["workshop.inventory"], 1);
+        assert!(play.take_script_errors().is_empty());
+    }
+}
+
+#[test]
+fn failed_native_command_batch_keeps_the_original_world() {
+    use forge3d::{
+        gameplay::{Command, Context, Systems},
+        runtime::{Object, Scene, Shape},
+    };
+    fn fail_after_delete(ctx: Context<'_>, commands: &mut Vec<Command>) -> Result<(), String> {
+        commands.push(Command::Despawn(ctx.object.id));
+        commands.push(Command::Spawn {
+            prefab: "missing".into(),
+            position: [0.; 3],
+        });
+        Ok(())
+    }
+    let mut scene = Scene::empty();
+    let mut owner = Object::new("Command owner", Shape::Cube);
+    owner.components.insert("example".into(), true.into());
+    owner.body = Some(Default::default());
+    let id = scene.add_object(owner).unwrap();
+    let mut systems = Systems::default();
+    systems.register("example", fail_after_delete).unwrap();
+    assert!(systems.register("example", fail_after_delete).is_err());
+    let mut play =
+        GamePlayback::with_systems(Game::single(scene), Progress::default(), systems).unwrap();
+    play.tick(Vec2::ZERO, 1. / 60.);
+    assert_eq!(play.scene().objects[0].id, id);
+    assert_eq!(
+        play.raycast([0., 2., 0.], [0., -1., 0.], 3., None)
+            .unwrap()
+            .unwrap()
+            .object_id,
+        id
+    );
+    assert!(play.take_script_errors()[0].contains("missing"));
+}

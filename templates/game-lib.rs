@@ -3,7 +3,8 @@ mod animation;
 #[allow(dead_code)]
 mod controls;
 #[allow(dead_code)]
-mod game;
+pub mod game;
+pub mod gameplay;
 #[allow(dead_code)]
 mod lighting;
 #[allow(dead_code)]
@@ -15,7 +16,7 @@ mod presentation;
 #[allow(dead_code)]
 mod progress;
 #[allow(dead_code)]
-mod runtime;
+pub mod runtime;
 #[allow(dead_code)]
 mod scripting;
 #[allow(dead_code)]
@@ -81,3 +82,4 @@ pub extern "C" fn quad_main() {
         eprintln!("{error}");
     }
 }
+pub mod workshop;

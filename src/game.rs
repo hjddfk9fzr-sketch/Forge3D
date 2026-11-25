@@ -20,12 +20,15 @@ pub(crate) fn valid_id(id: &str) -> bool {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Game {
     pub start: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prefabs: BTreeMap<String, Scene>,
     pub scenes: BTreeMap<String, Scene>,
 }
 
 impl Game {
     pub fn single(scene: Scene) -> Self {
         Self {
+            prefabs: BTreeMap::new(),
             start: "main".into(),
             scenes: BTreeMap::from([("main".into(), scene)]),
         }
@@ -49,7 +52,7 @@ impl Game {
         if game.scenes.insert(game.start.clone(), start).is_some() {
             return Err("Additional scenes duplicate the starting scene.".into());
         }
-        for (id, scene) in &mut game.scenes {
+        for (id, scene) in game.scenes.iter_mut().chain(&mut game.prefabs) {
             if !valid_id(id) {
                 return Err(format!("Invalid scene ID {id}."));
             }
@@ -64,6 +67,8 @@ pub struct GamePlayback {
     game: Game,
     current: String,
     play: Playback,
+    systems: crate::gameplay::Systems,
+    messages: Vec<crate::gameplay::Message>,
     errors: Vec<String>,
     progress: Progress,
     progress_changed: bool,
@@ -76,11 +81,21 @@ impl GamePlayback {
     }
 
     pub fn with_progress(game: Game, progress: Progress) -> Result<Self, String> {
+        Self::with_systems(game, progress, crate::workshop::game_systems())
+    }
+
+    pub fn with_systems(
+        game: Game,
+        progress: Progress,
+        systems: crate::gameplay::Systems,
+    ) -> Result<Self, String> {
         let play = Playback::new(game.start_scene()?.clone())?;
         Ok(Self {
             current: game.start.clone(),
             game,
             play,
+            systems,
+            messages: Vec::new(),
             errors: Vec::new(),
             progress,
             progress_changed: false,
@@ -90,6 +105,16 @@ impl GamePlayback {
 
     pub fn scene(&self) -> &Scene {
         self.play.scene()
+    }
+
+    pub fn raycast(
+        &self,
+        origin: [f32; 3],
+        direction: [f32; 3],
+        distance: f32,
+        ignore: Option<u64>,
+    ) -> Result<Option<crate::physics::RayHit>, String> {
+        self.play.raycast(origin, direction, distance, ignore)
     }
 
     pub fn presentation(&self, id: &str) -> &crate::presentation::Presentation {
@@ -125,6 +150,18 @@ impl GamePlayback {
     pub fn tick_input(&mut self, movement: Vec2, controls: &InputControls, dt: f32) -> bool {
         if !self.play.has_scene_request() {
             self.play.tick_input(movement, controls, dt);
+            if let Err(error) = self.systems.tick(
+                &mut self.play,
+                &self.game.prefabs,
+                &mut self.messages,
+                if dt.is_finite() {
+                    dt.clamp(0., 0.1)
+                } else {
+                    0.
+                },
+            ) {
+                self.errors.push(error);
+            }
         }
         self.sounds.clear();
         let mut next = None;
@@ -184,6 +221,7 @@ impl GamePlayback {
         match result {
             Ok(play) => {
                 self.errors.extend(self.play.take_script_errors());
+                self.messages.clear();
                 self.play = play;
                 self.current = next;
                 true

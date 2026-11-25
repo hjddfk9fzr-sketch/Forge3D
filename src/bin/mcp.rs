@@ -450,6 +450,11 @@ impl Session {
                     json!({"path":path.strip_prefix(&self.root).unwrap_or(&path),"entries":project::entries(&path)?}),
                 )
             }
+            "physics_raycast" => {
+                let (frames, mut play) = playback(&self.scene, &args, 0)?;
+                let hit = play.raycast(field(&args,"origin")?, field(&args,"direction")?, field(&args,"max_distance")?, optional(&args,"ignore_id", None)?)?;
+                Ok(json!({"frames":frames, "hit":hit, "script_errors":play.take_script_errors()}))
+            }
             "simulate" | "test_scene" => {
                 let (frames, mut play) = playback(&self.scene, &args, 1)?;
                 let errors = play.take_script_errors();
@@ -1054,6 +1059,7 @@ fn tools() -> Vec<Value> {
             &["name"],
         ),
         tool("asset_remove","Remove an unused model or script asset. Read the snapshot to refresh asset indices afterward.",json!({"kind":{"enum":["model","script"]},"index":index}),&["kind","index"]),
+        tool("physics_raycast","Return the nearest solid collider in a headless Play session.",json!({"origin":vec3,"direction":vec3,"max_distance":{"type":"number","exclusiveMinimum":0},"ignore_id":id,"frames":frame,"dt":dt,"input":axes,"controls":controls}),&["origin","direction","max_distance"]),
         tool(
             "simulate",
             "Run a bounded headless Play session and return object transforms and script errors.",

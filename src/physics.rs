@@ -100,7 +100,18 @@ pub struct Event {
     pub b: u64,
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct RayHit {
+    pub object_id: u64,
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    pub distance: f32,
+}
+
+pub(crate) type World = std::rc::Rc<std::cell::RefCell<Option<Physics>>>;
+
 pub(crate) struct Physics {
+    queries: QueryPipeline,
     pipeline: PhysicsPipeline,
     islands: IslandManager,
     broad: BroadPhaseMultiSap,
@@ -111,7 +122,7 @@ pub(crate) struct Physics {
     multibodies: MultibodyJointSet,
     ccd: CCDSolver,
     entries: Vec<Entry>,
-    contacts: BTreeSet<(usize, usize, bool)>,
+    contacts: BTreeSet<(u64, u64, bool)>,
 }
 
 struct Entry {
@@ -194,6 +205,7 @@ impl Physics {
             return Ok(None);
         }
         let mut world = Self {
+            queries: QueryPipeline::new(),
             pipeline: PhysicsPipeline::new(),
             islands: IslandManager::new(),
             broad: BroadPhaseMultiSap::new(),
@@ -206,20 +218,55 @@ impl Physics {
             entries: Vec::new(),
             contacts: BTreeSet::new(),
         };
-        for (index, pose) in poses(scene).into_iter().enumerate() {
-            let object = &scene.objects[index];
-            let Some(body) = &object.body else { continue };
-            if !pose.valid() {
+        world.sync(scene)?;
+        Ok(Some(world))
+    }
+
+    pub(crate) fn sync(&mut self, scene: &Scene) -> Result<(), String> {
+        let poses = poses(scene);
+        let mut indices = std::collections::HashMap::new();
+        for (index, object) in scene
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.body.is_some())
+        {
+            if !poses[index].valid() {
                 return Err(format!(
                     "Invalid world transform for collider on {}.",
                     object.name
                 ));
+            }
+            indices.insert(object.id, index);
+        }
+        self.entries.retain_mut(|entry| {
+            let id = self.bodies[entry.body].user_data as u64;
+            if let Some(index) = indices.remove(&id) {
+                entry.index = index;
+                return true;
+            }
+            self.bodies.remove(
+                entry.body,
+                &mut self.islands,
+                &mut self.colliders,
+                &mut self.impulses,
+                &mut self.multibodies,
+                true,
+            );
+            false
+        });
+        for (index, pose) in poses.into_iter().enumerate() {
+            let object = &scene.objects[index];
+            let Some(body) = &object.body else { continue };
+            if !indices.contains_key(&object.id) {
+                continue;
             }
             let builder = match body.kind {
                 BodyKind::Static => RigidBodyBuilder::fixed(),
                 BodyKind::Dynamic => RigidBodyBuilder::dynamic().ccd_enabled(true),
                 BodyKind::Kinematic => RigidBodyBuilder::kinematic_position_based(),
             }
+            .user_data(u128::from(object.id))
             .position(pose.isometry())
             .gravity_scale(body.gravity_scale);
             let builder = if body.lock_rotation {
@@ -227,26 +274,77 @@ impl Physics {
             } else {
                 builder
             };
-            let rigid_body = world.bodies.insert(builder.build());
-            let collider = world.colliders.insert_with_parent(
+            let rigid_body = self.bodies.insert(builder.build());
+            let collider = self.colliders.insert_with_parent(
                 ColliderBuilder::new(shape(body, pose.scale))
                     .sensor(body.sensor)
                     .active_collision_types(ActiveCollisionTypes::all())
                     .friction(body.friction)
                     .restitution(body.restitution)
-                    .user_data(index as u128)
+                    .user_data(u128::from(object.id))
                     .build(),
                 rigid_body,
-                &mut world.bodies,
+                &mut self.bodies,
             );
-            world.entries.push(Entry {
+            self.entries.push(Entry {
                 index,
                 body: rigid_body,
                 collider,
                 pose,
             });
         }
-        Ok(Some(world))
+        self.queries.update(&self.colliders);
+        Ok(())
+    }
+
+    pub(crate) fn raycast(
+        world: &World,
+        origin: [f32; 3],
+        direction: [f32; 3],
+        distance: f32,
+        ignore: Option<u64>,
+    ) -> Result<Option<RayHit>, String> {
+        let direction = Vec3::from_array(direction);
+        let scale = direction.abs().max_element();
+        if !origin.iter().all(|v| v.is_finite())
+            || !direction.is_finite()
+            || scale == 0.
+            || !distance.is_finite()
+            || distance <= 0.
+        {
+            return Err(
+                "Ray needs a finite origin, nonzero direction and positive finite range.".into(),
+            );
+        }
+        let world = world.borrow();
+        let Some(world) = world.as_ref() else {
+            return Ok(None);
+        };
+        let ray = Ray::new(
+            origin.into(),
+            ((direction / scale).normalize().to_array()).into(),
+        );
+        let id = |collider: &Collider| {
+            world.bodies[collider.parent().expect("colliders have bodies")].user_data as u64
+        };
+        let accept = |_, collider: &Collider| Some(id(collider)) != ignore;
+        let filter = QueryFilter::default().exclude_sensors().predicate(&accept);
+        Ok(world
+            .queries
+            .cast_ray_and_get_normal(
+                &world.bodies,
+                &world.colliders,
+                &ray,
+                distance,
+                true,
+                filter,
+            )
+            .map(|(handle, hit)| RayHit {
+                object_id: id(&world.colliders[handle]),
+                distance: hit.time_of_impact,
+                point: ray.point_at(hit.time_of_impact).coords.into(),
+                normal: hit.normal.into(),
+            }))
     }
 
     pub(crate) fn step(&mut self, scene: &mut Scene, input: Vec2) -> Vec<Event> {
@@ -303,7 +401,7 @@ impl Physics {
             &mut self.impulses,
             &mut self.multibodies,
             &mut self.ccd,
-            None,
+            Some(&mut self.queries),
             &(),
             &(),
         );
@@ -322,13 +420,13 @@ impl Physics {
             entry.pose.center = Vec3::from_array(object.position);
             entry.pose.rotation = rotation;
         }
-        self.events(scene)
+        self.events()
     }
 
-    fn events(&mut self, scene: &Scene) -> Vec<Event> {
+    fn events(&mut self) -> Vec<Event> {
         let pair = |a: ColliderHandle, b: ColliderHandle, sensor| {
-            let a = self.colliders[a].user_data as usize;
-            let b = self.colliders[b].user_data as usize;
+            let a = self.colliders[a].user_data as u64;
+            let b = self.colliders[b].user_data as u64;
             (a.min(b), a.max(b), sensor)
         };
         let contacts: BTreeSet<_> = self
@@ -343,15 +441,15 @@ impl Physics {
                     .map(|(a, b, _)| pair(a, b, true)),
             )
             .collect();
-        let event = |&(a, b, sensor): &(usize, usize, bool), entered| Event {
+        let event = |&(a, b, sensor): &(u64, u64, bool), entered| Event {
             kind: match (sensor, entered) {
                 (false, true) => EventKind::CollisionEnter,
                 (false, false) => EventKind::CollisionExit,
                 (true, true) => EventKind::TriggerEnter,
                 (true, false) => EventKind::TriggerExit,
             },
-            a: scene.objects[a].id,
-            b: scene.objects[b].id,
+            a,
+            b,
         };
         let events = contacts
             .difference(&self.contacts)

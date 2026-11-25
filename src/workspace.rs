@@ -1,3 +1,4 @@
+use crate::gameplay::slot;
 use crate::{
     game::{valid_id, Game},
     presentation::{Presentation, UiKey, Widget, WidgetKind},
@@ -76,7 +77,7 @@ impl Project {
         first.application.title = "Forge3D · Two Workshops".into();
         first.application.identifier = "com.forge3d.betademo".into();
         first.application.version = env!("CARGO_PKG_VERSION").into();
-        first.application.version_code = 112;
+        first.application.version_code = 120;
         first.objects[0].script = Some(
             r#"fn update(object, dt, input) {
                 if input.x > 0.5 { object.next_scene = "workshop"; }
@@ -114,13 +115,75 @@ impl Project {
         workshop.application = app.clone();
 
         let cue: std::sync::Arc<[u8]> = demo_cue()?.into();
-        entrance.objects[0].script = Some(level_script("object.x >= 2.5", "workshop"));
+        let pilot = &mut entrance.objects[0];
+        pilot.body = Some(crate::physics::Body {
+            kind: crate::physics::BodyKind::Kinematic,
+            ..Default::default()
+        });
+        pilot
+            .components
+            .insert("workshop.inventory".into(), 0.into());
+        let pilot_id = pilot.id;
+        let mut script = level_script("object.x >= 2.5", "workshop");
+        script.push_str(
+            r#"
+fn camera(view, object, dt, input) {
+    let side = if input.keys.contains("q") { -1.0 } else if input.keys.contains("r") { 1.0 } else { 0.0 };
+    view.x = object.x + side;
+    view.y = object.y + 0.65;
+    view.z = if side == 0.0 { object.z - 1.0 } else { object.z };
+    view.distance = 1.0;
+    view.yaw = -90.0 * side;
+    view.pitch = 0.0;
+    view
+}"#,
+        );
+        pilot.script = Some(script);
+        entrance.camera_controller = Some(pilot_id);
+        let mut door = Object::new("Workshop door", Shape::Cube);
+        door.position = [0., 1., -1.8];
+        door.scale = [1.2, 2., 0.18];
+        door.body = Some(crate::physics::Body::default());
+        door.script = Some(format!(
+            r#"fn update(object, dt, input) {{
+    if object.state.remove("use") == true || input.pressed.contains("e") {{
+        let hit = raycast(input.aim_origin, input.aim_direction, 2.0, "{pilot_id}");
+        if hit != () && hit.object_id == object.id {{
+            object.y = 3.5;
+            object.play_sound = "cue";
+        }}
+    }}
+    object
+}}
+fn on_ui(object, event) {{
+    if event.id == "use" {{ object.state["use"] = true; }}
+    object
+}}"#
+        ));
+        entrance.add_object(door)?;
+        let mut item = Object::new("Workshop token", Shape::Sphere);
+        item.scale = [0.35; 3];
+        item.body = Some(crate::physics::Body::default());
+        item.components
+            .insert("workshop.pickup".into(), 0.65.into());
+        item.script =
+            Some("fn update(object, dt, input) { object.ry += 80.0 * dt; object }".into());
+        let mut template = Scene::empty();
+        let root = template.add_object(item)?;
+        project.create_prefab("workshop-token", &template, root)?;
+        let mut spawner = Object::new("Token spawn", Shape::Empty);
+        spawner.position = [1.25, 0.55, 0.];
+        spawner
+            .components
+            .insert("workshop.spawn".into(), "workshop-token".into());
+        entrance.add_object(spawner)?;
         entrance.presentation.widgets = vec![
             text([0.10, 0.04, 0.80, 0.08], "01  /  THE ENTRANCE"),
             text(
                 [0.10, 0.13, 0.80, 0.07],
-                "Move right to reach the checkpoint",
+                "Face the door and press E to open it. Move right to the checkpoint.",
             ),
+            button([0.78, 0.75, 0.19, 0.09], "use", "Open [E]", UiKey::E),
             button([0.78, 0.87, 0.19, 0.09], "menu", "Menu", UiKey::Escape),
         ];
         entrance
@@ -537,6 +600,11 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
         }
         Ok(Game {
             start,
+            prefabs: self
+                .prefabs
+                .iter()
+                .map(|(id, prefab)| Ok((id.clone(), self.expand(prefab)?)))
+                .collect::<Result<_, String>>()?,
             scenes: self
                 .scenes
                 .iter()
@@ -594,35 +662,7 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
                 .ok_or_else(|| format!("Unknown prefab '{id}'."))?,
         )?;
         let mut result = scene.clone();
-        result.assign_ids()?;
-        let mut ids = BTreeMap::new();
-        let mut root = None;
-        for (index, _, _) in prefab.object_order() {
-            let mut object = prefab.objects[index].clone();
-            let original = object.id;
-            match object.parent {
-                Some(old) => object.parent = Some(ids[&old]),
-                None if root.is_none() => object.parent = parent,
-                None => return Err(format!("Prefab '{id}' has multiple roots.")),
-            }
-            if let Shape::Model(index) = object.shape {
-                object.shape = Shape::Model(slot(&mut result.models, &prefab.models[index]));
-            }
-            if let Some(index) = object.script_asset {
-                object.script_asset = Some(slot(&mut result.scripts, &prefab.scripts[index]));
-            }
-            object.id = result.next_id;
-            result.next_id = result
-                .next_id
-                .checked_add(1)
-                .ok_or("Scene ran out of object IDs.")?;
-            if root.is_none() {
-                root = Some(object.id);
-            }
-            ids.insert(original, object.id);
-            result.objects.push(object);
-        }
-        let root = root.ok_or_else(|| format!("Prefab '{id}' is empty."))?;
+        let root = crate::gameplay::instantiate(&prefab, &mut result, parent, id)?;
         result.validate()?;
         *scene = result;
         Ok(root)
@@ -765,14 +805,6 @@ fn resolve<T: Clone>(assets: &BTreeMap<AssetId, T>, ids: &[AssetId]) -> Result<V
                 .ok_or_else(|| format!("Missing shared asset {id}."))
         })
         .collect()
-}
-
-fn slot<T: Clone + PartialEq>(assets: &mut Vec<T>, asset: &T) -> usize {
-    if let Some(index) = assets.iter().position(|existing| existing == asset) {
-        return index;
-    }
-    assets.push(asset.clone());
-    assets.len() - 1
 }
 
 /// Keeps the working scene separate from the stored scenes so editor undo

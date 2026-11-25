@@ -144,6 +144,86 @@ impl Scripts {
         })
     }
 
+    pub(crate) fn retain_existing(&mut self, old: &Scene, new: &Scene) {
+        let indices: std::collections::HashMap<_, _> = new
+            .objects
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (o.id, i))
+            .collect();
+        self.instances.retain_mut(|instance| {
+            if let Some(index) = indices.get(&old.objects[instance.index].id) {
+                instance.index = *index;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    pub(crate) fn start_added(
+        &mut self,
+        first: usize,
+        scene: &mut Scene,
+        errors: &mut Vec<String>,
+    ) {
+        self.instances.retain(|instance| instance.index >= first);
+        self.start(scene, errors);
+    }
+
+    pub(crate) fn merge(&mut self, mut added: Self) {
+        self.instances.append(&mut added.instances);
+        append_effects(&mut self.effects, added.effects);
+    }
+
+    pub(crate) fn bind_physics(&mut self, world: crate::physics::World) {
+        self.engine.register_fn(
+            "raycast",
+            move |origin: rhai::Array,
+                  direction: rhai::Array,
+                  range: rhai::Dynamic,
+                  ignore: &str|
+                  -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
+                fn number(value: &rhai::Dynamic) -> Result<f32, String> {
+                    value
+                        .as_float()
+                        .map(|v| v as f32)
+                        .or_else(|_| value.as_int().map(|v| v as f32))
+                        .map_err(|_| "Expected a number".into())
+                }
+                fn vector(values: &[rhai::Dynamic]) -> Result<[f32; 3], String> {
+                    let [x, y, z] = values else {
+                        return Err("Expected a three-component vector".into());
+                    };
+                    Ok([number(x)?, number(y)?, number(z)?])
+                }
+                let ignore = if ignore.is_empty() {
+                    None
+                } else {
+                    Some(ignore.parse().map_err(|_| "Invalid ignored object ID")?)
+                };
+                let hit = crate::physics::Physics::raycast(
+                    &world,
+                    vector(&origin)?,
+                    vector(&direction)?,
+                    number(&range)?,
+                    ignore,
+                )?;
+                Ok(match hit {
+                    None => rhai::Dynamic::UNIT,
+                    Some(hit) => {
+                        let mut map = Map::new();
+                        map.insert("object_id".into(), hit.object_id.to_string().into());
+                        map.insert("point".into(), script_vector(hit.point));
+                        map.insert("normal".into(), script_vector(hit.normal));
+                        map.insert("distance".into(), f64::from(hit.distance).into());
+                        map.into()
+                    }
+                })
+            },
+        );
+    }
+
     pub(crate) fn has_scene_request(&self) -> bool {
         self.effects
             .iter()
@@ -306,7 +386,15 @@ fn append_effects(pending: &mut Vec<Effect>, effects: Vec<Effect>) {
     );
 }
 
-pub(crate) fn input_map(movement: Vec2, controls: &InputControls) -> Map {
+fn script_vector(values: [f32; 3]) -> rhai::Dynamic {
+    values
+        .into_iter()
+        .map(|v| f64::from(v).into())
+        .collect::<rhai::Array>()
+        .into()
+}
+
+pub(crate) fn input_map(movement: Vec2, controls: &InputControls, view: &View) -> Map {
     use crate::controls::{Button, Key};
     let keys = |values: &std::collections::BTreeSet<Key>| {
         values
@@ -338,6 +426,19 @@ pub(crate) fn input_map(movement: Vec2, controls: &InputControls) -> Map {
     map.insert("keys".into(), keys(&controls.keys).into());
     map.insert("pressed".into(), keys(&controls.pressed).into());
     map.insert("released".into(), keys(&controls.released).into());
+    let camera = view.camera();
+    map.insert(
+        "aim_origin".into(),
+        script_vector(camera.position.to_array()),
+    );
+    map.insert(
+        "aim_direction".into(),
+        script_vector(
+            (camera.target - camera.position)
+                .normalize_or_zero()
+                .to_array(),
+        ),
+    );
     map.insert("mouse".into(), mouse.into());
     map
 }
@@ -354,6 +455,7 @@ impl Instance {
                 map.insert(key.into(), f64::from(value).into());
             }
         }
+        map.insert("id".into(), object.id.to_string().into());
         map.insert("visible".into(), object.visible.into());
         map.insert("state".into(), self.state.clone().into());
         if !self.clips.is_empty() {

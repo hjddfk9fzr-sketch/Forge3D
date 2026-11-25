@@ -128,3 +128,28 @@ fn kinematic_platform_moves_a_dynamic_body() {
         passenger
     ));
 }
+
+#[test]
+fn ray_uses_world_units_stable_ids_and_solid_colliders() {
+    let mut scene = Scene::empty();
+    let mut ids = Vec::new();
+    for (z, sensor) in [(0., false), (1., true), (3., false), (5., false)] {
+        let mut object = Object::new("Collider", Shape::Cube);
+        object.position[2] = z;
+        object.body = Some(Body {
+            sensor,
+            ..Body::default()
+        });
+        ids.push(scene.add_object(object).unwrap());
+    }
+    let play = Playback::new(scene).unwrap();
+    let ray = |range, ignore| play.raycast([0.; 3], [0., 0., 8.], range, ignore).unwrap();
+    assert_eq!(ray(8., None).unwrap().object_id, ids[0]);
+    assert!(ray(2., Some(ids[0])).is_none());
+    let hit = ray(8., Some(ids[0])).unwrap();
+    assert_eq!(hit.object_id, ids[2]);
+    assert_eq!(hit.point, [0., 0., 2.5]);
+    assert_eq!(hit.normal, [0., 0., -1.]);
+    assert_eq!(hit.distance, 2.5);
+    assert!(play.raycast([0.; 3], [0.; 3], 1., None).is_err());
+}
