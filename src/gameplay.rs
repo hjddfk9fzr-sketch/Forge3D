@@ -83,6 +83,7 @@ pub struct Context<'a> {
     pub data: &'a Value,
     pub messages: &'a [Message],
     pub dt: f32,
+    pub actions: crate::controls::GameActions,
 }
 
 pub type System = fn(Context<'_>, &mut Vec<Command>) -> Result<(), String>;
@@ -117,6 +118,7 @@ impl Systems {
                             object,
                             data,
                             messages: &incoming,
+                            actions: play.actions,
                             dt,
                         },
                         &mut commands,

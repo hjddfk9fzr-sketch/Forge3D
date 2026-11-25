@@ -1,7 +1,7 @@
 #[allow(dead_code)]
 mod animation;
 #[allow(dead_code)]
-mod controls;
+pub mod controls;
 #[allow(dead_code)]
 pub mod game;
 pub mod gameplay;

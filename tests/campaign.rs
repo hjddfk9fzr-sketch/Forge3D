@@ -214,3 +214,104 @@ fn failed_native_command_batch_keeps_the_original_world() {
     );
     assert!(play.take_script_errors()[0].contains("missing"));
 }
+
+#[test]
+fn saved_action_bindings_drive_the_exported_campaign_on_three_inputs() {
+    use forge3d::{
+        controls::{InputControls, Key, MoveStick, PadButton},
+        physics::STEP,
+    };
+    let mut project = Project::campaign_demo().unwrap();
+    let mut entrance = project.scene("entrance").unwrap();
+    entrance.bindings.jump = "J".into();
+    entrance.bindings.interact = "F".into();
+    entrance.bindings.forward = "I".into();
+    entrance.bindings.pad_jump = PadButton::North;
+    entrance.bindings.pad_interact = PadButton::East;
+    entrance.bindings.move_stick = MoveStick::Right;
+    project.update_scene("entrance", &entrance).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("rebound.forge-project.json");
+    project.save(&path, false).unwrap();
+    let game = Project::load(&path)
+        .unwrap()
+        .game(Some("entrance"))
+        .unwrap();
+    let dir = temp.path().join("game");
+    export::collection(&game, &dir).unwrap();
+    let game = Game::decode(
+        &fs::read(dir.join("assets/scene.json")).unwrap(),
+        Some(&fs::read(dir.join("assets/scenes.json")).unwrap()),
+    )
+    .unwrap();
+    for source in ["keyboard", "gamepad", "touch"] {
+        let mut play = GamePlayback::new(game.clone()).unwrap();
+        for _ in 0..20 {
+            play.tick(Vec2::ZERO, STEP);
+        }
+        let floor = play.scene().objects[0].position;
+        let old = InputControls {
+            keys: [Key::W].into(),
+            pressed: [Key::Space, Key::E].into(),
+            pad_pressed: [PadButton::West, PadButton::South].into(),
+            left_stick: [0., -1.],
+            ..Default::default()
+        };
+        play.tick_input(Vec2::ZERO, &old, STEP);
+        let door_y = |play: &GamePlayback| {
+            play.scene()
+                .objects
+                .iter()
+                .find(|o| o.name == "Workshop door")
+                .unwrap()
+                .position[1]
+        };
+        assert_eq!(door_y(&play), 1.);
+        assert!((play.scene().objects[0].position[1] - floor[1]).abs() < 0.01);
+        assert_eq!(play.scene().objects[0].position[2], floor[2]);
+        let mut input = InputControls::default();
+        match source {
+            "keyboard" => {
+                input.pressed.insert(Key::J);
+            }
+            "gamepad" => {
+                input.pad_pressed.insert(PadButton::North);
+            }
+            _ => play.ui_action("jump").unwrap(),
+        }
+        play.tick_input(Vec2::ZERO, &input, STEP * 0.5);
+        play.tick(Vec2::ZERO, STEP * 0.5);
+        assert!(
+            play.scene().objects[0].position[1] > floor[1] + 0.03,
+            "{source}"
+        );
+        for _ in 0..75 {
+            play.tick(Vec2::ZERO, STEP);
+        }
+        input.clear_edges();
+        let movement = match source {
+            "keyboard" => {
+                input.pressed.insert(Key::F);
+                input.keys.insert(Key::I);
+                Vec2::ZERO
+            }
+            "gamepad" => {
+                input.pad_pressed.insert(PadButton::East);
+                input.right_stick = [0., -1.];
+                Vec2::ZERO
+            }
+            _ => {
+                play.ui_action("use").unwrap();
+                Vec2::NEG_Y
+            }
+        };
+        play.tick_input(movement, &input, STEP);
+        assert!(door_y(&play) > 3., "{source}");
+        input.clear_edges();
+        for _ in 0..100 {
+            play.tick_input(movement, &input, STEP);
+        }
+        assert_eq!(play.current(), "workshop", "{source}");
+        assert!(play.take_script_errors().is_empty());
+    }
+}

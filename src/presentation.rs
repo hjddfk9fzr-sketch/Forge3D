@@ -36,6 +36,8 @@ pub enum WidgetKind {
         text: String,
         #[serde(default)]
         key: Option<UiKey>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<crate::controls::Action>,
     },
 }
 
@@ -44,6 +46,13 @@ pub use crate::controls::Key as UiKey;
 impl Presentation {
     pub fn is_empty(&self) -> bool {
         self.widgets.is_empty() && self.sounds.is_empty() && !self.hide_movement
+    }
+
+    pub fn button_action(&self, button: &str) -> Option<crate::controls::Action> {
+        self.widgets.iter().find_map(|widget| match &widget.kind {
+            WidgetKind::Button { id, action, .. } if id == button => *action,
+            _ => None,
+        })
     }
 
     pub fn has_button(&self, id: &str) -> bool {
@@ -160,14 +169,20 @@ impl Overlay {
     }
 
     pub fn action(presentation: &Presentation, viewport: Rect) -> Option<&str> {
+        Self::action_with_pad(presentation, viewport, false)
+    }
+
+    pub fn action_with_pad(
+        presentation: &Presentation,
+        viewport: Rect,
+        confirm: bool,
+    ) -> Option<&str> {
         let point = Vec2::from(mouse_position());
         let pressed = is_mouse_button_pressed(MouseButton::Left);
-        let touch = if cfg!(target_os = "android") {
+        let taps = if cfg!(target_os = "android") {
             touches()
-                .into_iter()
-                .find(|touch| touch.phase == TouchPhase::Started)
         } else {
-            None
+            Vec::new()
         };
         presentation.widgets.iter().rev().find_map(|widget| {
             let WidgetKind::Button { id, key, .. } = &widget.kind else {
@@ -176,9 +191,10 @@ impl Overlay {
             let rect = bounds(viewport, widget);
             (key.is_some_and(|key| is_key_pressed(key.code()))
                 || (pressed && rect.contains(point))
-                || touch
-                    .as_ref()
-                    .is_some_and(|touch| rect.contains(touch.position)))
+                || (confirm && presentation.hide_movement && *key == Some(UiKey::Enter))
+                || taps
+                    .iter()
+                    .any(|t| t.phase == TouchPhase::Started && rect.contains(t.position)))
             .then_some(id.as_str())
         })
     }

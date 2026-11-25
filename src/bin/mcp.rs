@@ -914,13 +914,16 @@ fn tools() -> Vec<Value> {
     let buttons =
         json!({"type":"array","uniqueItems":true,"items":{"enum":["left","middle","right"]}});
     let pair = json!({"type":"array","minItems":2,"maxItems":2,"items":{"type":"number"}});
+    let pad = json!({"enum": controls::PadButton::ALL});
     let controls = json!({"type":"object","additionalProperties":false,"properties":{
         "keys":key_set,"pressed":key_set,"released":key_set,
+        "left_stick":pair,"right_stick":pair,"pad_pressed":{"type":"array","items":pad,"uniqueItems":true},
+        "actions":{"type":"array","uniqueItems":true,"items":{"enum":["jump","interact"]}},
         "mouse":{"type":"object","additionalProperties":false,"properties":{
             "position":pair,"wheel":pair,"down":buttons,"pressed":buttons,"released":buttons
         }}
     }});
-    let bindings = json!({"type":"object","properties":{"forward":key,"backward":key,"left":key,"right":key,"arrows":boolean},"additionalProperties":false});
+    let bindings = json!({"type":"object","properties":{"forward":key,"backward":key,"left":key,"right":key,"arrows":boolean,"jump":key,"interact":key,"pad_jump":pad,"pad_interact":pad,"move_stick":{"enum":["left","right"]}},"additionalProperties":false});
     let body = json!({"anyOf":[{"type":"null"},{"type":"object","properties":{
         "kind":{"enum":["static","dynamic","kinematic","character"]},"collider":{"enum":["box","sphere","capsule"]},
         "size":vec3,"sensor":boolean,"gravity_scale":{"type":"number","minimum":-10,"maximum":10},

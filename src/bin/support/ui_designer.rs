@@ -41,6 +41,7 @@ impl UiDesigner {
                     id,
                     text: "New button".into(),
                     key: None,
+                    action: None,
                 });
             }
             ui.checkbox(
@@ -305,11 +306,27 @@ impl UiDesigner {
                 ui.label("Text");
                 ui.text_edit_singleline(text);
             }
-            WidgetKind::Button { id, text, key } => {
+            WidgetKind::Button {
+                id,
+                text,
+                key,
+                action,
+            } => {
                 ui.label("Button ID");
                 ui.text_edit_singleline(id);
                 ui.label("Text");
                 ui.text_edit_singleline(text);
+                egui::ComboBox::from_id_salt("widget-action")
+                    .selected_text(format!("Game action: {action:?}"))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(action, None, "None");
+                        for a in [
+                            forge3d::controls::Action::Interact,
+                            forge3d::controls::Action::Jump,
+                        ] {
+                            ui.selectable_value(action, Some(a), format!("{a:?}"));
+                        }
+                    });
                 egui::ComboBox::from_id_salt("widget-key")
                     .selected_text(key.map_or("No keyboard shortcut", UiKey::name))
                     .height(235.)

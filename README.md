@@ -1,6 +1,12 @@
-# Forge3D 1.3.0
+# Forge3D 1.3.1
 
 Forge3D — 3D-движок на Rust с настольным редактором сцен и экспортом игр в самостоятельные Cargo-проекты. Редактор использует Macroquad и egui. Игровой проект использует Macroquad и включает исходники рантайма.
+
+## Действия ввода в 1.3.1
+
+Снимите выделение объекта и откройте **Inspector → Physics and input**. Здесь настраиваются клавиши движения, прыжка и взаимодействия, стик движения и кнопки геймпада для текущей сцены. Сохраните проект перед экспортом. По умолчанию движение использует WASD, стрелки или левый стик, прыжок — Space или нижнюю кнопку геймпада, взаимодействие — E или левую кнопку. В меню Workshop Run нижняя кнопка начинает игру.
+
+В скрипте Rhai используйте `input.actions.move` (массив X/Z), `input.actions.jump` и `input.actions.interact` (нажатие в текущем шаге). Системы Rust получают тот же ввод в `Context.actions`. Экранной кнопке в редакторе UI можно назначить **Game action**. В Workshop Run на Android стрелки управляют движением, кнопки **Jump** и **Open** вызывают те же игровые действия. Физические геймпады подключаются через gilrs в настольных сборках macOS, Windows и Linux.
 
 ## Контроллер персонажа в 1.3
 
@@ -16,7 +22,7 @@ Forge3D — 3D-движок на Rust с настольным редакторо
 
 ## Запуск редактора
 
-Установите актуальный стабильный Rust. На Windows используйте Rust MSVC и Visual Studio Build Tools с компонентами C++. На Mac с Apple Silicon установите Command Line Tools командой `xcode-select --install`. На Linux установите библиотеки разработки X11, Xi, OpenGL и ALSA (`libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev` в Ubuntu). Команда ниже запускает редактор из каталога `forge3d`.
+Установите актуальный стабильный Rust. На Windows используйте Rust MSVC и Visual Studio Build Tools с компонентами C++. На Mac с Apple Silicon установите Command Line Tools командой `xcode-select --install`. На Linux установите библиотеки разработки X11, Xi, OpenGL и ALSA (`libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev libudev-dev` в Ubuntu). Команда ниже запускает редактор из каталога `forge3d`.
 
 ```sh
 cargo run --locked
@@ -263,7 +269,7 @@ Beta открывает сцены alpha версии 1 и обновляет и
 
 CLI пишет этапы в stderr и итоговый JSON в stdout. Нажмите Ctrl+C, чтобы остановить сборку и её дочерние процессы. `retry` читает снимок сцены и профиль из подготовленного каталога. При сбое до создания каталога запустите `build` с исходной сценой.
 
-GitHub Actions содержит матрицу Windows x64, macOS 15 arm64, Linux и Android ARM64. В задании macOS проверяется архитектура раннера. Настольные задания собирают игру и запускают `--check-scene`. Флаг `--window-smoke` открывает настоящее игровое окно, рисует восемь кадров и завершает процесс. В CI он выполняется на Linux, а для Windows и macOS его можно включить при ручном запуске матрицы. Android-задание устанавливает `libasound2-dev` для Linux-версии `forge3d-batch`, собирает APK и AAB и проверяет подписи, используя отдельный ключ запуска CI. [Конфигурация проверок](.github/workflows/platforms.yml) · [Результаты проверок](RELEASE-CHECKS.md)
+GitHub Actions содержит матрицу Windows x64, macOS 15 arm64, Linux и Android ARM64. В задании macOS проверяется архитектура раннера. Настольные задания собирают игру и запускают `--check-scene`. Флаг `--window-smoke` открывает настоящее игровое окно, рисует восемь кадров и завершает процесс. В CI он выполняется на Linux, а для Windows и macOS его можно включить при ручном запуске матрицы. Android-задание устанавливает `libasound2-dev libudev-dev` для Linux-версии `forge3d-batch`, собирает APK и AAB и проверяет подписи, используя отдельный ключ запуска CI. [Конфигурация проверок](.github/workflows/platforms.yml) · [Результаты проверок](RELEASE-CHECKS.md)
 
 ## Замер производительности
 

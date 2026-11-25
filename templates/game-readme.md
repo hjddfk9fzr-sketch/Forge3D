@@ -8,7 +8,7 @@
 
 Команда `cargo run -- --check-scene` проверяет встроенные сцены без окна. Для замера загрузки, времени кадра и памяти запустите `cargo run --release -- --benchmark 180 workshop`, где `workshop` — ID сцены. Уберите ID для замера стартовой сцены. JSON выводится после 30 кадров прогрева и указанного числа измерений. Команда `cargo run -- --window-smoke` открывает окно, отрисовывает восемь кадров и завершает игру.
 
-На Linux для сборки также нужны библиотеки X11, Xi, OpenGL и ALSA (`libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev` в Ubuntu).
+На Linux для сборки также нужны библиотеки X11, Xi, OpenGL, ALSA и udev (`libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev libudev-dev` в Ubuntu).
 
 ## Android ARM64
 

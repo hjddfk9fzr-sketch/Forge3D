@@ -158,6 +158,48 @@ game_keys!(
     Back,
 );
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GameActions {
+    pub movement: Vec2,
+    pub jump: bool,
+    pub interact: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    Interact,
+    Jump,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PadButton {
+    South,
+    East,
+    West,
+    North,
+    LeftShoulder,
+    RightShoulder,
+}
+impl PadButton {
+    pub const ALL: [Self; 6] = [
+        Self::South,
+        Self::East,
+        Self::West,
+        Self::North,
+        Self::LeftShoulder,
+        Self::RightShoulder,
+    ];
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveStick {
+    Left,
+    Right,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Bindings {
@@ -166,6 +208,11 @@ pub struct Bindings {
     pub left: String,
     pub right: String,
     pub arrows: bool,
+    pub jump: String,
+    pub interact: String,
+    pub pad_jump: PadButton,
+    pub pad_interact: PadButton,
+    pub move_stick: MoveStick,
 }
 
 impl Default for Bindings {
@@ -176,18 +223,63 @@ impl Default for Bindings {
             left: "A".into(),
             right: "D".into(),
             arrows: true,
+            jump: "Space".into(),
+            interact: "E".into(),
+            pad_jump: PadButton::South,
+            pad_interact: PadButton::West,
+            move_stick: MoveStick::Left,
         }
     }
 }
 
 impl Bindings {
     pub fn validate(&self) -> Result<(), String> {
-        for key in [&self.forward, &self.backward, &self.left, &self.right] {
+        for key in [
+            &self.forward,
+            &self.backward,
+            &self.left,
+            &self.right,
+            &self.jump,
+            &self.interact,
+        ] {
             if !KEY_NAMES.contains(&key.as_str()) {
                 return Err(format!("Unsupported input key {key}."));
             }
         }
         Ok(())
+    }
+
+    pub fn move_axis(&self, input: &InputControls) -> Vec2 {
+        let down = |key: &str, arrow| {
+            (Key::parse(key).is_some_and(|k| input.keys.contains(&k))
+                || self.arrows && input.keys.contains(&arrow)) as u8 as f32
+        };
+        let keys = vec2(
+            down(&self.right, Key::Right) - down(&self.left, Key::Left),
+            down(&self.backward, Key::Down) - down(&self.forward, Key::Up),
+        )
+        .normalize_or_zero();
+        let stick = Vec2::from_array(match self.move_stick {
+            MoveStick::Left => input.left_stick,
+            MoveStick::Right => input.right_stick,
+        });
+        (keys
+            + if stick.is_finite() && stick.length_squared() >= 0.04 {
+                stick
+            } else {
+                Vec2::ZERO
+            })
+        .clamp_length_max(1.)
+    }
+
+    pub fn pressed(&self, action: Action, input: &InputControls) -> bool {
+        let (key, button) = match action {
+            Action::Interact => (&self.interact, self.pad_interact),
+            Action::Jump => (&self.jump, self.pad_jump),
+        };
+        input.actions.contains(&action)
+            || Key::parse(key).is_some_and(|k| input.pressed.contains(&k))
+            || input.pad_pressed.contains(&button)
     }
 
     pub fn movement(&self) -> Vec2 {
@@ -238,6 +330,10 @@ pub struct InputControls {
     pub pressed: BTreeSet<Key>,
     pub released: BTreeSet<Key>,
     pub mouse: Pointer,
+    pub pad_pressed: BTreeSet<PadButton>,
+    pub left_stick: [f32; 2],
+    pub right_stick: [f32; 2],
+    pub actions: BTreeSet<Action>,
 }
 
 impl InputControls {
@@ -272,10 +368,13 @@ impl InputControls {
                 pressed: buttons(is_mouse_button_pressed),
                 released: buttons(is_mouse_button_released),
             },
+            ..Default::default()
         }
     }
 
     pub fn clear_edges(&mut self) {
+        self.actions.clear();
+        self.pad_pressed.clear();
         self.pressed.clear();
         self.released.clear();
         self.mouse.pressed.clear();
@@ -284,6 +383,10 @@ impl InputControls {
     }
 
     pub(crate) fn accumulate(&mut self, latest: &Self) {
+        self.actions.extend(&latest.actions);
+        self.pad_pressed.extend(&latest.pad_pressed);
+        self.left_stick = latest.left_stick;
+        self.right_stick = latest.right_stick;
         self.keys.clone_from(&latest.keys);
         self.pressed.extend(&latest.pressed);
         self.released.extend(&latest.released);
@@ -295,4 +398,62 @@ impl InputControls {
             *sum += delta;
         }
     }
+}
+
+pub struct Gamepads {
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    device: Option<gilrs::Gilrs>,
+}
+impl Default for Gamepads {
+    fn default() -> Self {
+        Self {
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            device: gilrs::Gilrs::new().ok(),
+        }
+    }
+}
+impl Gamepads {
+    pub fn capture(&mut self, origin: Vec2) -> InputControls {
+        let mut input = InputControls::capture(origin);
+        self.poll(&mut input);
+        input
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn poll(&mut self, input: &mut InputControls) {
+        use gilrs::{Axis, Button as B, EventType};
+        let Some(device) = self.device.as_mut() else {
+            return;
+        };
+        while let Some(event) = device.next_event() {
+            if let EventType::ButtonPressed(button, _) = event.event {
+                let mapped = match button {
+                    B::South => PadButton::South,
+                    B::East => PadButton::East,
+                    B::West => PadButton::West,
+                    B::North => PadButton::North,
+                    B::LeftTrigger => PadButton::LeftShoulder,
+                    B::RightTrigger => PadButton::RightShoulder,
+                    _ => continue,
+                };
+                input.pad_pressed.insert(mapped);
+            }
+        }
+        for (_, pad) in device.gamepads() {
+            for (axes, dest) in [
+                ((Axis::LeftStickX, Axis::LeftStickY), &mut input.left_stick),
+                (
+                    (Axis::RightStickX, Axis::RightStickY),
+                    &mut input.right_stick,
+                ),
+            ] {
+                let stick = vec2(pad.value(axes.0), -pad.value(axes.1));
+                if stick.length_squared() > Vec2::from_array(*dest).length_squared() {
+                    *dest = stick.to_array();
+                }
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    fn poll(&mut self, _input: &mut InputControls) {}
 }

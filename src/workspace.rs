@@ -77,7 +77,7 @@ impl Project {
         first.application.title = "Forge3D · Two Workshops".into();
         first.application.identifier = "com.forge3d.betademo".into();
         first.application.version = env!("CARGO_PKG_VERSION").into();
-        first.application.version_code = 130;
+        first.application.version_code = 131;
         first.objects[0].script = Some(
             r#"fn update(object, dt, input) {
                 if input.x > 0.5 { object.next_scene = "workshop"; }
@@ -146,17 +146,13 @@ fn camera(view, object, dt, input) {
         door.body = Some(crate::physics::Body::default());
         door.script = Some(format!(
             r#"fn update(object, dt, input) {{
-    if object.state.remove("use") == true || input.pressed.contains("e") {{
+    if input.actions.interact {{
         let hit = raycast(input.aim_origin, input.aim_direction, 2.0, "{pilot_id}");
         if hit != () && hit.object_id == object.id {{
             object.y = 3.5;
             object.play_sound = "cue";
         }}
     }}
-    object
-}}
-fn on_ui(object, event) {{
-    if event.id == "use" {{ object.state["use"] = true; }}
     object
 }}"#
         ));
@@ -195,9 +191,20 @@ fn on_ui(object, event) {{
             text([0.10, 0.04, 0.80, 0.08], "01  /  THE ENTRANCE"),
             text(
                 [0.10, 0.13, 0.80, 0.07],
-                "Open the door [E], then walk forward through the token.",
+                "Open the door, then walk forward through the token.",
             ),
-            button([0.78, 0.75, 0.19, 0.09], "use", "Open [E]", UiKey::E),
+            action_button(
+                [0.78, 0.63, 0.19, 0.09],
+                "jump",
+                "Jump",
+                crate::controls::Action::Jump,
+            ),
+            action_button(
+                [0.78, 0.75, 0.19, 0.09],
+                "use",
+                "Open",
+                crate::controls::Action::Interact,
+            ),
             button([0.78, 0.87, 0.19, 0.09], "menu", "Menu", UiKey::Escape),
         ];
         entrance
@@ -724,6 +731,19 @@ fn button(rect: [f32; 4], id: &str, text: &str, key: UiKey) -> Widget {
             id: id.into(),
             text: text.into(),
             key: Some(key),
+            action: None,
+        },
+    }
+}
+
+fn action_button(rect: [f32; 4], id: &str, text: &str, action: crate::controls::Action) -> Widget {
+    Widget {
+        rect,
+        kind: WidgetKind::Button {
+            id: id.into(),
+            text: text.into(),
+            key: None,
+            action: Some(action),
         },
     }
 }

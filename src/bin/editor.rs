@@ -452,6 +452,7 @@ impl Browser {
 }
 
 struct Editor {
+    pads: controls::Gamepads,
     scene: Scene,
     prepared: PreparedScene,
     selected: Option<usize>,
@@ -507,6 +508,7 @@ impl Editor {
             .unwrap_or(DEFAULT_UI_SCALE);
         Self {
             prepared: PreparedScene::new(&scene),
+            pads: Default::default(),
             view: scene.camera.clone(),
             saved: scene.clone(),
             scene,
@@ -1570,6 +1572,8 @@ impl Editor {
                         ("Backward", &mut input.backward),
                         ("Left", &mut input.left),
                         ("Right", &mut input.right),
+                        ("Jump", &mut input.jump),
+                        ("Interact", &mut input.interact),
                     ] {
                         egui::ComboBox::from_id_salt(("key", name))
                             .selected_text(key.as_str())
@@ -1581,6 +1585,29 @@ impl Editor {
                         ui.label(name);
                     }
                     ui.checkbox(&mut input.arrows, "Also use arrow keys");
+                    egui::ComboBox::from_label("Move stick")
+                        .selected_text(format!("{:?}", input.move_stick))
+                        .show_ui(ui, |ui| {
+                            for stick in [controls::MoveStick::Left, controls::MoveStick::Right] {
+                                ui.selectable_value(
+                                    &mut input.move_stick,
+                                    stick,
+                                    format!("{stick:?}"),
+                                );
+                            }
+                        });
+                    for (label, binding) in [
+                        ("Gamepad jump", &mut input.pad_jump),
+                        ("Gamepad interact", &mut input.pad_interact),
+                    ] {
+                        egui::ComboBox::from_label(label)
+                            .selected_text(format!("{binding:?}"))
+                            .show_ui(ui, |ui| {
+                                for b in controls::PadButton::ALL {
+                                    ui.selectable_value(binding, b, format!("{b:?}"));
+                                }
+                            });
+                    }
                     return;
                 };
                 self.parent_inspector(ui, index);
@@ -1999,24 +2026,23 @@ impl Editor {
             (self.preview.as_mut(), self.overlay.as_mut())
         {
             if !self.paused || std::mem::take(&mut self.step_preview) {
-                let action =
-                    Overlay::action(&preview.scene().presentation, overlay_rect).map(str::to_owned);
+                let input = self.pads.capture(vec2(overlay_rect.x, overlay_rect.y));
+                let action = Overlay::action_with_pad(
+                    &preview.scene().presentation,
+                    overlay_rect,
+                    input.pad_pressed.contains(&controls::PadButton::South),
+                )
+                .map(str::to_owned);
                 if let Some(button) = action.as_deref() {
                     let _ = preview.ui_action(button);
                 }
-                let movement = if action.is_none() {
-                    preview.scene().bindings.movement()
-                } else {
-                    Vec2::ZERO
-                };
                 let before = preview.current().to_owned();
                 let dt = if self.paused {
                     1. / 60.
                 } else {
                     get_frame_time()
                 };
-                let input = controls::InputControls::capture(vec2(overlay_rect.x, overlay_rect.y));
-                let switched = preview.tick_input(movement, &input, dt);
+                let switched = preview.tick_input(Vec2::ZERO, &input, dt);
                 let sounds = preview.take_sounds();
                 overlay
                     .play(

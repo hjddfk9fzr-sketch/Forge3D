@@ -4,7 +4,6 @@ use crate::{
     physics::Event,
     runtime::{Object, Scene, Shape, View},
 };
-use macroquad::prelude::Vec2;
 use rhai::{CallFnOptions, Engine, Map, Scope, AST};
 
 pub const DEFAULT_SCRIPT: &str = r#"fn update(object, dt, input) {
@@ -394,8 +393,13 @@ fn script_vector(values: [f32; 3]) -> rhai::Dynamic {
         .into()
 }
 
-pub(crate) fn input_map(movement: Vec2, controls: &InputControls, view: &View) -> Map {
+pub(crate) fn input_map(
+    frame: crate::controls::GameActions,
+    controls: &InputControls,
+    view: &View,
+) -> Map {
     use crate::controls::{Button, Key};
+    let movement = frame.movement;
     let keys = |values: &std::collections::BTreeSet<Key>| {
         values
             .iter()
@@ -423,6 +427,18 @@ pub(crate) fn input_map(movement: Vec2, controls: &InputControls, view: &View) -
     let mut map = Map::new();
     map.insert("x".into(), f64::from(movement.x).into());
     map.insert("z".into(), f64::from(movement.y).into());
+    let mut actions = Map::new();
+    actions.insert(
+        "move".into(),
+        vec![
+            rhai::Dynamic::from(f64::from(movement.x)),
+            rhai::Dynamic::from(f64::from(movement.y)),
+        ]
+        .into(),
+    );
+    actions.insert("jump".into(), frame.jump.into());
+    actions.insert("interact".into(), frame.interact.into());
+    map.insert("actions".into(), actions.into());
     map.insert("keys".into(), keys(&controls.keys).into());
     map.insert("pressed".into(), keys(&controls.pressed).into());
     map.insert("released".into(), keys(&controls.released).into());

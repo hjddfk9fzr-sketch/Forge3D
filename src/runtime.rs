@@ -1,6 +1,6 @@
 use crate::{
     animation::{self, Influence, Player, Rig},
-    controls::{Bindings, InputControls},
+    controls::{Action, Bindings, GameActions, Gamepads, InputControls, PadButton},
     lighting::{self, Lighting, PointLight, Surface},
     physics::{self, Body, BodyKind, ColliderKind, Event, Physics},
     presentation::{Overlay, Presentation},
@@ -1242,6 +1242,7 @@ pub struct Playback {
     physics: physics::World,
     accumulated: f64,
     pending_controls: InputControls,
+    pub(crate) actions: GameActions,
     events: Vec<Event>,
     dropped_events: usize,
 }
@@ -1255,7 +1256,11 @@ impl Playback {
         scripts.start(&mut scene, &mut script_errors);
         let physics = physics::World::new(std::cell::RefCell::new(Physics::new(&scene)?));
         scripts.bind_physics(physics.clone());
-        let initial_input = input_map(Vec2::ZERO, &InputControls::default(), &scene.camera);
+        let initial_input = input_map(
+            GameActions::default(),
+            &InputControls::default(),
+            &scene.camera,
+        );
         scripts.camera(&mut scene, &initial_input, 0., &mut script_errors);
         Ok(Self {
             scene,
@@ -1264,6 +1269,7 @@ impl Playback {
             physics,
             accumulated: 0.,
             pending_controls: InputControls::default(),
+            actions: GameActions::default(),
             events: Vec::new(),
             dropped_events: 0,
         })
@@ -1325,39 +1331,48 @@ impl Playback {
         } else {
             0.
         };
+        let movement = (movement + self.scene.bindings.move_axis(controls)).clamp_length_max(1.);
+        self.actions = GameActions {
+            movement,
+            ..Default::default()
+        };
+        self.pending_controls.accumulate(controls);
         if self.physics.borrow().is_none() {
-            self.run_step(
-                movement,
-                &input_map(movement, controls, &self.scene.camera),
-                dt,
-                false,
-            );
+            self.run_step(movement, dt);
             return;
         }
-        self.pending_controls.accumulate(controls);
         self.accumulated += f64::from(dt);
         let step = f64::from(physics::STEP);
         while self.accumulated + 1e-8 >= step {
             self.accumulated = (self.accumulated - step).max(0.);
-            let input = input_map(movement, &self.pending_controls, &self.scene.camera);
-            let jump = self
-                .pending_controls
-                .pressed
-                .contains(&crate::controls::Key::Space);
-            self.pending_controls.clear_edges();
-            self.run_step(movement, &input, physics::STEP, jump);
+            self.run_step(movement, physics::STEP);
         }
     }
 
-    fn run_step(&mut self, movement: Vec2, input: &rhai::Map, dt: f32, jump: bool) {
+    fn run_step(&mut self, movement: Vec2, dt: f32) {
+        let actions = GameActions {
+            movement,
+            jump: self
+                .scene
+                .bindings
+                .pressed(Action::Jump, &self.pending_controls),
+            interact: self
+                .scene
+                .bindings
+                .pressed(Action::Interact, &self.pending_controls),
+        };
+        self.actions.jump |= actions.jump;
+        self.actions.interact |= actions.interact;
+        let input = input_map(actions, &self.pending_controls, &self.scene.camera);
+        self.pending_controls.clear_edges();
         update(&mut self.scene, movement, dt);
         self.scripts
-            .step(&mut self.scene, input, dt, &mut self.script_errors);
+            .step(&mut self.scene, &input, dt, &mut self.script_errors);
         let events = self
             .physics
             .borrow_mut()
             .as_mut()
-            .map(|physics| physics.step(&mut self.scene, movement, jump));
+            .map(|physics| physics.step(&mut self.scene, movement, actions.jump));
         if let Some(events) = events {
             self.scripts
                 .events(&mut self.scene, &events, &mut self.script_errors);
@@ -1371,7 +1386,7 @@ impl Playback {
             }
         }
         self.scripts
-            .camera(&mut self.scene, input, dt, &mut self.script_errors);
+            .camera(&mut self.scene, &input, dt, &mut self.script_errors);
     }
 
     pub(crate) fn has_scene_request(&self) -> bool {
@@ -1381,6 +1396,9 @@ impl Playback {
     pub fn ui_action(&mut self, button: &str) -> Result<(), String> {
         if !self.scene.presentation.has_button(button) {
             return Err(format!("Unknown UI button '{button}'."));
+        }
+        if let Some(action) = self.scene.presentation.button_action(button) {
+            self.pending_controls.actions.insert(action);
         }
         self.scripts
             .ui(&mut self.scene, button, &mut self.script_errors);
@@ -1456,6 +1474,7 @@ pub async fn run_measured(
         }
     };
     let mut prepared = PreparedScene::new(playback.scene());
+    let mut pads = Gamepads::default();
     let mut overlay = Overlay::new(&playback.scene().presentation);
     let mut frames = 0;
     loop {
@@ -1465,24 +1484,32 @@ pub async fn run_measured(
             && playback.scene().objects.iter().any(|object| {
                 object.speed != 0. || object.script.is_some() || object.script_asset.is_some()
             });
+        let input = if automated {
+            InputControls::default()
+        } else {
+            pads.capture(Vec2::ZERO)
+        };
         let action = (!automated)
-            .then(|| Overlay::action(&playback.scene().presentation, viewport).map(str::to_owned))
+            .then(|| {
+                Overlay::action_with_pad(
+                    &playback.scene().presentation,
+                    viewport,
+                    input.pad_pressed.contains(&PadButton::South),
+                )
+                .map(str::to_owned)
+            })
             .flatten();
         if let Some(button) = action.as_deref() {
             if let Err(error) = playback.ui_action(button) {
                 macroquad::logging::error!("{error}");
             }
         }
-        let movement = if !automated && action.is_none() {
-            playback.scene().bindings.movement()
-        } else {
-            Vec2::ZERO
-        };
+        let movement = Vec2::ZERO;
         #[cfg(target_os = "android")]
         let mut movement = movement;
         let controls = touch_controls();
         #[cfg(target_os = "android")]
-        if !automated && show_controls && action.is_none() {
+        if !automated && show_controls {
             for touch in touches() {
                 if matches!(
                     touch.phase,
@@ -1497,11 +1524,6 @@ pub async fn run_measured(
             }
         }
         let before = playback.current().to_owned();
-        let input = if automated {
-            InputControls::default()
-        } else {
-            InputControls::capture(Vec2::ZERO)
-        };
         let switched = playback.tick_input(movement.clamp_length_max(1.), &input, get_frame_time());
         let sounds = playback.take_sounds();
         overlay
