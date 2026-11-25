@@ -4,6 +4,7 @@ use crate::{
     controls::Action,
     lighting::{Skybox, Surface},
     physics::Body,
+    relay::{RelayGate, Role},
     runtime::View,
     settings::Application,
 };
@@ -83,6 +84,7 @@ fn arch() -> Result<(Scene, u64), String> {
         sensor: true,
         ..Default::default()
     });
+    RelayGate::default().attach(&mut gate);
     let root = scene.add_object(gate)?;
     for x in [-1., 1.] {
         let mut post = block(
@@ -136,12 +138,14 @@ fn course(project: &Project, app: &Application, second: bool) -> Result<Scene, S
         let id = project.instantiate("relay-arch", &mut scene, None)?;
         let index = scene.object_index(id)?;
         scene.objects[index].position = [cx, 0., z];
-        scene.objects[index].name = if z == -6.5 {
-            "Relay transmitter"
-        } else {
-            "Exit relay"
+        if z == -13. {
+            scene.objects[index].name = "Exit arch".into();
+            RelayGate {
+                role: Role::Exit,
+                destination: if second { "finish" } else { "vesper" }.into(),
+            }
+            .attach(&mut scene.objects[index]);
         }
-        .into();
         if second {
             let strip = scene
                 .objects
@@ -180,23 +184,9 @@ fn course(project: &Project, app: &Application, second: bool) -> Result<Scene, S
         ..Body::character()
     });
     let here = if second { "vesper" } else { "amber" };
-    let next = if second { "finish" } else { "vesper" };
     courier.script = Some(format!(
         r#"fn update(object, dt, input) {{
         if object.y < -4.0 {{ object.next_scene="{here}"; }}
-        object
-    }}
-    fn on_event(object,event) {{
-        if event.kind=="trigger_enter" {{
-            if event.other_name=="Relay transmitter" && object.state["relay"] != true {{
-                object.state["relay"]=true;
-                object.play_sound="signal";
-            }}
-            if event.other_name=="Exit relay" && object.state["relay"] == true {{
-                object.next_scene="{next}";
-                object.play_sound="signal";
-            }}
-        }}
         object
     }}
     fn camera(view,object,dt,input) {{
@@ -283,7 +273,7 @@ impl Project {
             title: "Cloud Relay".into(),
             identifier: "org.forge3d.cloudrelay".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            version_code: 140,
+            version_code: 141,
             ..Default::default()
         };
         let mut menu = Scene::empty();

@@ -242,6 +242,10 @@ impl Scripts {
         Some(id)
     }
 
+    pub(crate) fn extend_effects(&mut self, effects: Vec<Effect>) {
+        append_effects(&mut self.effects, effects);
+    }
+
     pub(crate) fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
     }

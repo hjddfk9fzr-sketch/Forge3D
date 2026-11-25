@@ -34,6 +34,33 @@ impl Game {
         }
     }
 
+    pub fn validate_components(&self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for (kind, entries) in [("scene", &self.scenes), ("prefab", &self.prefabs)] {
+            for (id, scene) in entries {
+                for object in &scene.objects {
+                    let check = crate::relay::RelayGate::read(object).and_then(|gate| match gate {
+                        Some(gate) => {
+                            gate.validate(object, |target| self.scenes.contains_key(target))
+                        }
+                        None => Ok(()),
+                    });
+                    if let Err(e) = check {
+                        errors.push(format!(
+                            "{kind} '{id}', object '{}' #{}: {e}",
+                            object.name, object.id
+                        ));
+                    }
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("\n"))
+        }
+    }
+
     pub fn start_scene(&self) -> Result<&Scene, String> {
         self.scenes
             .get(&self.start)
@@ -89,6 +116,7 @@ impl GamePlayback {
         progress: Progress,
         systems: crate::gameplay::Systems,
     ) -> Result<Self, String> {
+        game.validate_components()?;
         let play = Playback::new(game.start_scene()?.clone())?;
         Ok(Self {
             current: game.start.clone(),

@@ -1259,6 +1259,7 @@ pub fn movement_input() -> Vec2 {
 pub struct Playback {
     scene: Scene,
     scripts: Scripts,
+    relays: crate::relay::Relays,
     script_errors: Vec<String>,
     physics: physics::World,
     accumulated: f64,
@@ -1272,6 +1273,7 @@ impl Playback {
     pub fn new(mut scene: Scene) -> Result<Self, String> {
         scene.assign_ids()?;
         scene.validate_objects()?;
+        let relays = crate::relay::Relays::from_scene(&scene)?;
         let mut scripts = Scripts::compile(&scene)?;
         let mut script_errors = Vec::new();
         scripts.start(&mut scene, &mut script_errors);
@@ -1286,6 +1288,7 @@ impl Playback {
         Ok(Self {
             scene,
             scripts,
+            relays,
             script_errors,
             physics,
             accumulated: 0.,
@@ -1302,6 +1305,8 @@ impl Playback {
 
     pub(crate) fn commit_objects(&mut self, mut next: Scene) -> Result<(), String> {
         next.validate_objects()?;
+        let mut relays = crate::relay::Relays::from_scene(&next)?;
+        relays.preserve_charge(&self.relays);
         // Commands preserve the order of surviving objects and append new IDs.
         let first = next
             .objects
@@ -1328,6 +1333,7 @@ impl Playback {
         if let Some(scripts) = added {
             self.scripts.merge(scripts);
         }
+        self.relays = relays;
         self.scene = next;
         Ok(())
     }
@@ -1395,6 +1401,8 @@ impl Playback {
             .as_mut()
             .map(|physics| physics.step(&mut self.scene, movement, actions.jump));
         if let Some(events) = events {
+            self.scripts
+                .extend_effects(self.relays.events(&events, &self.scene));
             self.scripts
                 .events(&mut self.scene, &events, &mut self.script_errors);
             let preserved = events.len().min(4096 - self.events.len());

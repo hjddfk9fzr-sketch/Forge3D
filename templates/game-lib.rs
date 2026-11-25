@@ -83,3 +83,4 @@ pub extern "C" fn quad_main() {
     }
 }
 pub mod workshop;
+pub mod relay;

@@ -1,3 +1,5 @@
+#[path = "support/component_editor.rs"]
+mod component_editor;
 #[path = "support/script_editor.rs"]
 mod script_editor;
 #[path = "support/ui_designer.rs"]
@@ -1700,6 +1702,7 @@ impl Editor {
                     _ => None,
                 };
                 rendering_inspector(ui, object, rig);
+                self.dirty |= component_editor::show(ui, object, self.project.as_ref());
                 physics_inspector(ui, object);
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {

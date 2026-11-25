@@ -18,7 +18,11 @@ fn relay_can_be_lost_completed_and_restarted_after_export() {
         Some(&std::fs::read(out.join("assets/scenes.json")).unwrap()),
     )
     .unwrap();
-    let mut play = GamePlayback::new(exported).unwrap();
+    run_route(exported, "finish");
+}
+
+fn run_route(game: Game, finish: &str) {
+    let mut play = GamePlayback::new(game).unwrap();
     play.ui_action("start").unwrap();
     play.tick(Vec2::ZERO, STEP);
     assert_eq!(play.current(), "amber");
@@ -41,7 +45,7 @@ fn relay_can_be_lost_completed_and_restarted_after_export() {
         }
     }
     assert!(fell && player(&play)[2] > 0.5);
-    for (level, next) in [("amber", "vesper"), ("vesper", "finish")] {
+    for (level, next) in [("amber", "vesper"), ("vesper", finish)] {
         let mut jumped = [false; 2];
         for _ in 0..480 {
             let [x, _, z] = player(&play);
@@ -153,4 +157,106 @@ fn a_local_override_stays_local_if_the_prefab_temporarily_matches_it() {
     }
     p.revert_property(&mut b, copy, &path).unwrap();
     assert_eq!(b.objects[0].speed, 7.);
+}
+
+#[test]
+fn renamed_gates_route_to_an_edited_destination_after_save_and_export() {
+    use forge3d::relay::{RelayGate, Role};
+    let mut project = Project::cloud_relay().unwrap();
+    project
+        .add_scene("alternate", &project.scene("finish").unwrap())
+        .unwrap();
+    for level in ["amber", "vesper"] {
+        let mut scene = project.scene(level).unwrap();
+        for o in &mut scene.objects {
+            if let Some(mut gate) = RelayGate::read(o).unwrap() {
+                o.name = "Renamed arch".into();
+                if gate.role == Role::Exit && level == "vesper" {
+                    gate.destination = "alternate".into();
+                }
+                gate.attach(o);
+            }
+        }
+        project.update_scene(level, &scene).unwrap();
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("route.forge-project.json");
+    project.save(&file, false).unwrap();
+    let game = Project::load(&file).unwrap().game(None).unwrap();
+    let out = tmp.path().join("export");
+    export::collection(&game, &out).unwrap();
+    run_route(
+        Game::decode(
+            &std::fs::read(out.join("assets/scene.json")).unwrap(),
+            Some(&std::fs::read(out.join("assets/scenes.json")).unwrap()),
+        )
+        .unwrap(),
+        "alternate",
+    );
+}
+
+#[test]
+fn missing_gate_destination_names_the_object_before_play_and_export() {
+    let mut game = Project::cloud_relay().unwrap().game(None).unwrap();
+    game.scenes.remove("vesper");
+    for message in [
+        export::validate(&game).unwrap_err(),
+        GamePlayback::new(game).err().unwrap(),
+    ] {
+        for part in ["amber", "Exit arch", "vesper"] {
+            assert!(message.contains(part), "{message}");
+        }
+    }
+}
+
+#[test]
+fn applying_gate_destination_preserves_local_roles_and_other_exits() {
+    use forge3d::relay::{RelayGate, Role, COMPONENT};
+    let mut project = Project::cloud_relay().unwrap();
+    let mut scene = project.scene("amber").unwrap();
+    let exit = scene
+        .objects
+        .iter()
+        .find(|o| {
+            RelayGate::read(o)
+                .unwrap()
+                .is_some_and(|g| g.role == Role::Exit)
+        })
+        .unwrap()
+        .id;
+    let path = [
+        String::from("components"),
+        COMPONENT.into(),
+        "destination".into(),
+    ];
+    project
+        .apply_property("amber", &scene, exit, &path)
+        .unwrap();
+    let vesper = project.scene("vesper").unwrap();
+    let gates: Vec<_> = vesper
+        .objects
+        .iter()
+        .filter_map(|o| RelayGate::read(o).unwrap())
+        .collect();
+    assert!(gates
+        .iter()
+        .any(|g| g.role == Role::Transmitter && g.destination == "vesper"));
+    assert!(gates
+        .iter()
+        .any(|g| g.role == Role::Exit && g.destination == "finish"));
+    scene = project.scene("amber").unwrap();
+    let i = scene.object_index(exit).unwrap();
+    RelayGate {
+        role: Role::Exit,
+        destination: "finish".into(),
+    }
+    .attach(&mut scene.objects[i]);
+    project.revert_property(&mut scene, exit, &path).unwrap();
+    assert_eq!(
+        RelayGate::read(&scene.objects[i]).unwrap().unwrap(),
+        RelayGate {
+            role: Role::Exit,
+            destination: "vesper".into()
+        }
+    );
 }

@@ -13,6 +13,7 @@ pub mod physics;
 pub mod presentation;
 pub mod progress;
 pub mod project;
+pub mod relay;
 pub mod runtime;
 pub mod scripting;
 pub mod settings;

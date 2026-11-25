@@ -17,6 +17,7 @@ pub fn validate(game: &Game) -> Result<(), String> {
 
 fn validated_game(game: &Game) -> Result<Game, String> {
     game.start_scene()?;
+    game.validate_components()?;
     let mut game = game.clone();
     for (id, scene) in game.scenes.iter_mut().chain(&mut game.prefabs) {
         if !crate::game::valid_id(id) {
@@ -86,6 +87,7 @@ pub(crate) fn staged_game(
             directory.join("src/workshop.rs"),
             include_str!("workshop.rs"),
         )?;
+        fs::write(directory.join("src/relay.rs"), include_str!("relay.rs"))?;
         fs::write(directory.join("src/game.rs"), include_str!("game.rs"))?;
         fs::write(
             directory.join("src/settings.rs"),
