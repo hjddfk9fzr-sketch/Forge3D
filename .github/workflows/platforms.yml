@@ -1,0 +1,195 @@
+name: Forge3D platform checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      desktop_graphics:
+        description: Try the graphical demo on the Windows and macOS runners
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: linux-x64
+            triple: x86_64-unknown-linux-gnu
+            suffix: ''
+            editor: Forge3D
+          - runner: windows-latest
+            target: windows-x64
+            triple: x86_64-pc-windows-msvc
+            suffix: .exe
+            editor: Forge3D.exe
+          - runner: macos-15
+            target: macos-arm64
+            triple: aarch64-apple-darwin
+            suffix: ''
+            editor: Forge3D.app.zip
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+      - name: Verify Apple Silicon runner
+        if: runner.os == 'macOS'
+        run: test "$(uname -m)" = arm64
+      - name: Linux desktop libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev xvfb xauth
+      - run: cargo test --locked
+      - name: Build and package the editor and tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP"
+          if [ "$RUNNER_OS" = Windows ]; then work=$(cygpath -u "$work"); fi
+          triple="${{ matrix.triple }}"
+          suffix="${{ matrix.suffix }}"
+          cargo build --locked --release --target "$triple" --bin forge3d --bin forge3d-batch --bin forge3d-mcp
+          binaries="target/$triple/release"
+          package="$work/forge-editor"
+          mkdir -p "$package"
+          "$binaries/forge3d-batch$suffix" package-editor "${{ matrix.target }}" "$binaries/forge3d$suffix" "$package/${{ matrix.editor }}"
+          cp "$binaries/forge3d-batch$suffix" "$binaries/forge3d-mcp$suffix" "$package/"
+          cp README.md COMPATIBILITY.md MCP.md ROADMAP.md RELEASE-CHECKS.md "$package/"
+          cp tests/fixtures/model-ascii.fbx "$package/example.fbx"
+          "$binaries/forge3d-batch$suffix" campaign-demo "$package/workshop-run.forge-project.json"
+          "$binaries/forge3d-batch$suffix" validate "$package/workshop-run.forge-project.json"
+          tar -czf "$work/forge3d-editor-${{ matrix.target }}.tar.gz" -C "$package" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forge3d-editor-${{ matrix.target }}
+          path: ${{ runner.temp }}/forge3d-editor-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+      - name: Build and run the exported game
+        shell: bash
+        run: |
+          set -eu
+          work="$RUNNER_TEMP"
+          if [ "$RUNNER_OS" = Windows ]; then work=$(cygpath -u "$work"); fi
+          scene="$work/demo.forge-project.json"
+          output="$work/forge-game"
+          cargo run --locked --bin forge3d-batch -- campaign-demo "$scene"
+          cargo run --locked --bin forge3d-batch -- build "$scene" "$output" release "${{ matrix.target }}"
+          "$output/target/${{ matrix.triple }}/release/forge-game${{ matrix.suffix }}" --check-scene
+      - name: Open the exported game window
+        if: runner.os == 'Linux' || inputs.desktop_graphics
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP"
+          if [ "$RUNNER_OS" = Windows ]; then work=$(cygpath -u "$work"); fi
+          game="$work/forge-game/target/${{ matrix.triple }}/release/forge-game${{ matrix.suffix }}"
+          if [ "$RUNNER_OS" = Linux ]; then
+            printf 'pcm.!default { type null }\n' > "$work/alsa-null.conf"
+            ALSA_CONFIG_PATH="$work/alsa-null.conf" LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a "$game" --window-smoke 2>&1 | tee "$work/window-smoke.log"
+          else
+            "$game" --window-smoke 2>&1 | tee "$work/window-smoke.log"
+          fi
+          grep -F 'Forge3D rendered 8 frames' "$work/window-smoke.log"
+      - name: Open the editor window
+        if: runner.os == 'Linux' || inputs.desktop_graphics
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          editor="target/${{ matrix.triple }}/release/forge3d${{ matrix.suffix }}"
+          if [ "$RUNNER_OS" = Linux ]; then
+            ALSA_CONFIG_PATH="$RUNNER_TEMP/alsa-null.conf" LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a "$editor" --window-smoke
+          else
+            "$editor" --window-smoke
+          fi
+      - name: Measure Workshop Run
+        if: runner.os == 'Linux'
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          game="$RUNNER_TEMP/forge-game/target/${{ matrix.triple }}/release/forge-game"
+          ALSA_CONFIG_PATH="$RUNNER_TEMP/alsa-null.conf" LIBGL_ALWAYS_SOFTWARE=1 \
+            xvfb-run -a "$game" --benchmark 180 workshop > "$RUNNER_TEMP/benchmark.json"
+          python3 -c 'import json,sys; report=json.load(open(sys.argv[1])); assert report["frames"]==180 and report["scene"]=="workshop"' "$RUNNER_TEMP/benchmark.json"
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: workshop-benchmark-linux-x64
+          path: ${{ runner.temp }}/benchmark.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: demo-${{ matrix.target }}
+          path: ${{ runner.temp }}/forge-game/dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always() && (runner.os == 'Linux' || inputs.desktop_graphics)
+        with:
+          name: window-log-${{ matrix.target }}
+          path: ${{ runner.temp }}/window-smoke.log
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Linux libraries for the host CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          cmdline-tools-version: "12266719"
+          log-accepted-android-sdk-licenses: false
+          packages: 'platforms;android-35 build-tools;35.0.0 ndk;28.0.13004108'
+      - name: Install Cargo NDK
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Export and sign the test game
+        shell: bash
+        run: |
+          set -euo pipefail
+          scene="$RUNNER_TEMP/demo.forge-project.json"
+          output="$RUNNER_TEMP/forge-game"
+          export FORGE3D_ANDROID_KEYSTORE="$RUNNER_TEMP/forge-ci.p12"
+          export FORGE3D_ANDROID_KEY_ALIAS=forgeci
+          export FORGE3D_ANDROID_STORE_PASSWORD=forge-ci-test-pass
+          export FORGE3D_ANDROID_KEY_PASSWORD="$FORGE3D_ANDROID_STORE_PASSWORD"
+          keytool -genkeypair -storetype PKCS12 -keyalg RSA -keysize 2048 -validity 30 \
+            -dname "CN=Forge3D CI" -keystore "$FORGE3D_ANDROID_KEYSTORE" -alias "$FORGE3D_ANDROID_KEY_ALIAS" \
+            -storepass:env FORGE3D_ANDROID_STORE_PASSWORD -keypass:env FORGE3D_ANDROID_KEY_PASSWORD
+          cargo run --locked --bin forge3d-batch -- campaign-demo "$scene"
+          cargo run --locked --bin forge3d-batch -- build "$scene" "$output" android-release
+          apk=$(find "$output/android/build/outputs/apk/release" -name '*.apk' -print -quit)
+          test -f "$apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify "$apk"
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 "$apk"
+          gradle --no-daemon -p "$output/android" bundleRelease
+          bundle=$(find "$output/android/build/outputs/bundle/release" -name '*.aab' -print -quit)
+          jarsigner -J-Duser.language=en -J-Duser.country=US -verify "$bundle" | grep -F "jar verified."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: demo-android-arm64
+          path: |
+            ${{ runner.temp }}/forge-game/android/build/outputs/apk/release/*.apk
+            ${{ runner.temp }}/forge-game/android/build/outputs/bundle/release/*.aab
+          if-no-files-found: error

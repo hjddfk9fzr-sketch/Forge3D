@@ -1,0 +1,128 @@
+import groovy.json.JsonSlurper
+
+plugins {
+    id 'com.android.application' version '8.9.2'
+}
+
+def rustProject = projectDir.parentFile
+def rustSources = fileTree(rustProject) {
+    include 'Cargo.toml', 'Cargo.lock', 'src/**', 'assets/**'
+}
+def generatedJava = layout.buildDirectory.dir('forge/java')
+def generatedNative = layout.buildDirectory.dir('forge/jniLibs')
+
+def app = new JsonSlurper().parse(file('forge-app.json'))
+def signingVars = [
+    keystore: 'FORGE3D_ANDROID_KEYSTORE',
+    alias: 'FORGE3D_ANDROID_KEY_ALIAS',
+    storePassword: 'FORGE3D_ANDROID_STORE_PASSWORD',
+    keyPassword: 'FORGE3D_ANDROID_KEY_PASSWORD'
+]
+def signing = signingVars.collectEntries { key, name ->
+    [key, providers.environmentVariable(name).orNull]
+}
+def hasReleaseSigner = signing.values().every { it != null && !it.isEmpty() }
+
+android {
+    namespace 'com.forge3d.game'
+    compileSdk 35
+    ndkVersion '28.0.13004108'
+
+    defaultConfig {
+        applicationId(app.identifier as String)
+        minSdk 23
+        targetSdk 35
+        versionCode(app.version_code as int)
+        versionName(app.version as String)
+        manifestPlaceholders = [
+            forgeLabel: app.label,
+            forgeOrientation: app.orientation,
+            forgeTheme: app.fullscreen ? '@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen'
+                : '@android:style/Theme.DeviceDefault.NoActionBar'
+        ]
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    if (hasReleaseSigner) {
+        signingConfigs {
+            forgeRelease {
+                storeFile file(signing.keystore)
+                storePassword signing.storePassword
+                keyAlias signing.alias
+                keyPassword signing.keyPassword
+            }
+        }
+        buildTypes.release.signingConfig = signingConfigs.forgeRelease
+    }
+
+    sourceSets {
+        main.java.srcDir generatedJava
+        main.jniLibs.srcDir generatedNative
+    }
+}
+
+tasks.register('generateQuadActivity') {
+    inputs.files rustSources
+    outputs.dir generatedJava
+
+    doLast {
+        def metadata = new ByteArrayOutputStream()
+        project.exec {
+            workingDir rustProject
+            signingVars.values().each { environment.remove(it) }
+            commandLine 'cargo', 'metadata', '--format-version', '1'
+            standardOutput = metadata
+        }
+        def packages = new JsonSlurper().parseText(metadata.toString('UTF-8')).packages
+        def miniquad = packages.find { it.name == 'miniquad' && it.version == '0.4.8' }
+        if (miniquad == null) {
+            throw new GradleException('Miniquad 0.4.8 is required for the Android activity.')
+        }
+        def upstream = new File(new File(miniquad.manifest_path).parentFile, 'java')
+        def output = generatedJava.get().asFile
+        copy {
+            from new File(upstream, 'QuadNative.java')
+            into new File(output, 'quad_native')
+        }
+        def activity = new File(output, 'com/forge3d/game/MainActivity.java')
+        activity.parentFile.mkdirs()
+        activity.setText(new File(upstream, 'MainActivity.java').getText('UTF-8')
+            .replace('TARGET_PACKAGE_NAME', 'com.forge3d.game')
+            .replace('LIBRARY_NAME', 'forge_game')
+            .replace('super.onCreate(savedInstanceState);', '''super.onCreate(savedInstanceState);
+        try {
+            android.system.Os.setenv("FORGE3D_ANDROID_FILES_DIR", getFilesDir().getAbsolutePath(), true);
+        } catch (android.system.ErrnoException error) {
+            throw new IllegalStateException("Could not set the game progress directory", error);
+        }'''), 'UTF-8')
+    }
+}
+
+tasks.register('buildRust') {
+    dependsOn 'generateQuadActivity'
+    inputs.files rustSources
+    outputs.dir generatedNative
+
+    doLast {
+        project.exec {
+            workingDir rustProject
+            environment 'ANDROID_NDK_HOME', androidComponents.sdkComponents.ndkDirectory.get().asFile.absolutePath
+            signingVars.values().each { environment.remove(it) }
+            commandLine 'cargo', 'ndk', '-t', 'arm64-v8a', '--platform', '23',
+                '-o', generatedNative.get().asFile.absolutePath, 'build', '--lib', '--release'
+        }
+    }
+}
+
+tasks.named('preBuild') {
+    dependsOn 'buildRust'
+}
+
+gradle.taskGraph.whenReady { graph ->
+    def releases = ['assembleRelease', 'bundleRelease', 'packageRelease', 'packageReleaseBundle', 'signReleaseBundle']
+    if (graph.allTasks.any { it.project == project && releases.contains(it.name) } && !hasReleaseSigner) {
+        throw new GradleException('Android release requires ' + signingVars.values().join(', '))
+    }
+}

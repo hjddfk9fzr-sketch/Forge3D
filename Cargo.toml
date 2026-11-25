@@ -1,0 +1,48 @@
+[package]
+name = "forge3d"
+version = "1.0.1"
+edition = "2021"
+default-run = "forge3d"
+
+[dependencies]
+macroquad = { version = "=0.4.14", features = ["audio"] }
+egui-macroquad = { version = "0.17", default-features = false }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+semver = "1"
+hound = "3.5"
+zip = { version = "4.6", default-features = false }
+rhai = "=1.27.0"
+rapier3d = { version = "=0.26.1", features = ["enhanced-determinism"] }
+tobj = "4"
+ufbx = "0.11.5"
+tempfile = "3"
+command-group = "5"
+ctrlc = "3"
+tiny_http = "0.12"
+getrandom = "0.4"
+base64 = "0.22"
+gltf = { version = "1.4", features = ["KHR_materials_unlit"] }
+urlencoding = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[[bin]]
+name = "forge3d"
+path = "src/bin/editor.rs"
+
+[[bin]]
+name = "forge3d-mcp"
+path = "src/bin/mcp.rs"
+
+[[bin]]
+name = "forge3d-batch"
+path = "src/bin/batch.rs"
