@@ -12,6 +12,7 @@ pub enum BodyKind {
     Static,
     Dynamic,
     Kinematic,
+    Character,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +20,7 @@ pub enum BodyKind {
 pub enum ColliderKind {
     Box,
     Sphere,
+    Capsule,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -33,6 +35,8 @@ pub struct Body {
     pub friction: f32,
     pub restitution: f32,
     pub lock_rotation: bool,
+    pub max_slope_degrees: f32,
+    pub jump_height: f32,
 }
 
 impl Default for Body {
@@ -46,11 +50,22 @@ impl Default for Body {
             friction: 0.5,
             restitution: 0.,
             lock_rotation: false,
+            max_slope_degrees: 45.,
+            jump_height: 1.0,
         }
     }
 }
 
 impl Body {
+    pub fn character() -> Self {
+        Self {
+            kind: BodyKind::Character,
+            collider: ColliderKind::Capsule,
+            size: [0.6, 1., 0.6],
+            ..Self::default()
+        }
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if !self
             .size
@@ -58,6 +73,16 @@ impl Body {
             .all(|value| (0.001..=10_000.).contains(&value))
         {
             return Err("Collider dimensions must be between 0.001 and 10000.");
+        }
+        if self.kind == BodyKind::Character
+            && (self.collider != ColliderKind::Capsule || self.sensor || self.gravity_scale < 0.)
+        {
+            return Err("Character bodies require a solid capsule and nonnegative gravity scale.");
+        }
+        if !(0. ..=89.).contains(&self.max_slope_degrees)
+            || !(0. ..=100.).contains(&self.jump_height)
+        {
+            return Err("Use a slope angle of 0..89 degrees and jump height of 0..100.");
         }
         if !(-10. ..=10.).contains(&self.gravity_scale) {
             return Err("Gravity scale must be between -10 and 10.");
@@ -130,6 +155,8 @@ struct Entry {
     body: RigidBodyHandle,
     collider: ColliderHandle,
     pose: Pose,
+    vertical_speed: f32,
+    grounded: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -185,12 +212,22 @@ fn poses(scene: &Scene) -> Vec<Pose> {
     poses
 }
 
+fn capsule(config: &Body, scale: Vec3) -> (f32, f32) {
+    let radius = (0.5 * config.size[0] * scale.x.max(scale.z)).clamp(0.0005, 10_000.);
+    let half_segment = (0.5 * config.size[1] * scale.y - radius).clamp(0., 10_000.);
+    (half_segment, radius)
+}
+
 fn shape(config: &Body, scale: Vec3) -> SharedShape {
     let size = Vec3::from_array(config.size) * scale;
     match config.collider {
         ColliderKind::Box => {
             let half = (size * 0.5).clamp(Vec3::splat(0.0005), Vec3::splat(10_000.));
             SharedShape::cuboid(half.x, half.y, half.z)
+        }
+        ColliderKind::Capsule => {
+            let (half, radius) = capsule(config, scale);
+            SharedShape::capsule_y(half, radius)
         }
         ColliderKind::Sphere => {
             let radius = (config.size[0] * scale.max_element() * 0.5).clamp(0.0005, 10_000.);
@@ -264,7 +301,9 @@ impl Physics {
             let builder = match body.kind {
                 BodyKind::Static => RigidBodyBuilder::fixed(),
                 BodyKind::Dynamic => RigidBodyBuilder::dynamic().ccd_enabled(true),
-                BodyKind::Kinematic => RigidBodyBuilder::kinematic_position_based(),
+                BodyKind::Kinematic | BodyKind::Character => {
+                    RigidBodyBuilder::kinematic_position_based()
+                }
             }
             .user_data(u128::from(object.id))
             .position(pose.isometry())
@@ -291,6 +330,8 @@ impl Physics {
                 body: rigid_body,
                 collider,
                 pose,
+                vertical_speed: 0.,
+                grounded: false,
             });
         }
         self.queries.update(&self.colliders);
@@ -347,8 +388,9 @@ impl Physics {
             }))
     }
 
-    pub(crate) fn step(&mut self, scene: &mut Scene, input: Vec2) -> Vec<Event> {
+    pub(crate) fn step(&mut self, scene: &mut Scene, input: Vec2, jump: bool) -> Vec<Event> {
         let poses = poses(scene);
+        let mut refresh_queries = false;
         for entry in &mut self.entries {
             let object = &scene.objects[entry.index];
             let config = object
@@ -360,6 +402,7 @@ impl Physics {
                 continue;
             }
             if (pose.scale - entry.pose.scale).abs().max_element() > 0.00001 {
+                refresh_queries = true;
                 self.colliders[entry.collider].set_shape(shape(config, pose.scale));
             } else {
                 pose.scale = entry.pose.scale;
@@ -368,7 +411,10 @@ impl Physics {
             let changed = pose.center != entry.pose.center
                 || pose.rotation.dot(entry.pose.rotation).abs() < 0.9999999;
             match config.kind {
-                BodyKind::Static if changed => body.set_position(pose.isometry(), true),
+                BodyKind::Static if changed => {
+                    body.set_position(pose.isometry(), true);
+                    refresh_queries = true;
+                }
                 BodyKind::Kinematic => body.set_next_kinematic_position(pose.isometry()),
                 BodyKind::Dynamic => {
                     if changed {
@@ -387,6 +433,59 @@ impl Physics {
             entry.pose = pose;
         }
         let [x, y, z] = scene.gravity;
+        if refresh_queries
+            && self
+                .entries
+                .iter()
+                .any(|e| scene.objects[e.index].is_character())
+        {
+            self.bodies
+                .propagate_modified_body_positions_to_colliders(&mut self.colliders);
+            self.queries.update(&self.colliders);
+        }
+        for entry in &mut self.entries {
+            let object = &scene.objects[entry.index];
+            if !object.is_character() {
+                continue;
+            }
+            let config = object.body.as_ref().unwrap();
+            let gravity = y.min(0.) * config.gravity_scale;
+            if jump && entry.grounded {
+                entry.vertical_speed = (-2. * gravity * config.jump_height).sqrt();
+            }
+            entry.vertical_speed += gravity * STEP;
+            let axes = input.clamp_length_max(1.) * object.speed;
+            let angle = config.max_slope_degrees.to_radians();
+            let controller = rapier3d::control::KinematicCharacterController {
+                max_slope_climb_angle: angle,
+                min_slope_slide_angle: angle,
+                ..Default::default()
+            };
+            let origin = entry.pose.isometry();
+            let motion = controller.move_shape(
+                STEP,
+                &self.bodies,
+                &self.colliders,
+                &self.queries,
+                self.colliders[entry.collider].shape(),
+                &origin,
+                vector![axes.x, entry.vertical_speed, axes.y] * STEP,
+                QueryFilter::default()
+                    .exclude_rigid_body(entry.body)
+                    .exclude_sensors(),
+                |_| {},
+            );
+            entry.grounded = motion.grounded && entry.vertical_speed <= 0.;
+            if entry.grounded
+                || (entry.vertical_speed > 0.
+                    && motion.translation.y < entry.vertical_speed * STEP - 0.001)
+            {
+                entry.vertical_speed = 0.;
+            }
+            let mut destination = origin;
+            destination.translation.vector += motion.translation;
+            self.bodies[entry.body].set_next_kinematic_position(destination);
+        }
         self.pipeline.step(
             &vector![x, y, z],
             &IntegrationParameters {
@@ -407,7 +506,7 @@ impl Physics {
         );
         for entry in &mut self.entries {
             let object = &mut scene.objects[entry.index];
-            if !object.is_dynamic() {
+            if !object.is_dynamic() && !object.is_character() {
                 continue;
             }
             let body = &self.bodies[entry.body];
@@ -487,6 +586,35 @@ pub fn draw_gizmos(scene: &Scene, camera: &macroquad::prelude::Camera3D) {
         }
         let size = Vec3::from_array(config.size) * pose.scale;
         match config.collider {
+            ColliderKind::Capsule => {
+                let (half, radius) = capsule(config, pose.scale);
+                for sign in [-1., 1.] {
+                    let center = Vec3::Y * half * sign;
+                    for i in 0..24 {
+                        let angle = i as f32 * std::f32::consts::TAU / 24.;
+                        let next = (i + 1) as f32 * std::f32::consts::TAU / 24.;
+                        let radial = vec3(angle.cos(), 0., angle.sin()) * radius;
+                        draw_line_3d(
+                            center + radial,
+                            center + vec3(next.cos(), 0., next.sin()) * radius,
+                            color,
+                        );
+                        if i % 6 == 0 {
+                            let mut previous = center + radial;
+                            for j in 1..=8 {
+                                let a = j as f32 * std::f32::consts::FRAC_PI_2 / 8.;
+                                let end =
+                                    center + radial * a.cos() + Vec3::Y * radius * sign * a.sin();
+                                draw_line_3d(previous, end, color);
+                                previous = end;
+                            }
+                            if sign > 0. {
+                                draw_line_3d(center + radial, -center + radial, color);
+                            }
+                        }
+                    }
+                }
+            }
             ColliderKind::Box => draw_cube_wires(Vec3::ZERO, size * 1.002, color),
             ColliderKind::Sphere => draw_sphere_wires(
                 Vec3::ZERO,

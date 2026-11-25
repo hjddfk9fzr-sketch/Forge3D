@@ -2977,14 +2977,41 @@ fn physics_inspector(ui: &mut egui::Ui, object: &mut Object) {
                     ui.selectable_value(&mut body.kind, BodyKind::Static, "Static");
                     ui.add_enabled_ui(object.parent.is_none(), |ui| {
                         ui.selectable_value(&mut body.kind, BodyKind::Dynamic, "Dynamic");
+                        if ui
+                            .selectable_value(
+                                &mut body.kind,
+                                BodyKind::Character,
+                                "Character controller",
+                            )
+                            .changed()
+                        {
+                            *body = Body::character();
+                            if object.speed == 0. {
+                                object.speed = 3.;
+                            }
+                        }
                     });
                     ui.selectable_value(&mut body.kind, BodyKind::Kinematic, "Kinematic");
                 });
+            if body.kind == BodyKind::Character {
+                number(ui, "Capsule diameter", &mut body.size[0], 0.001..=10_000.);
+                number(ui, "Capsule height", &mut body.size[1], 0.001..=10_000.);
+                number(ui, "Jump height", &mut body.jump_height, 0. ..=100.);
+                number(
+                    ui,
+                    "Max slope (degrees)",
+                    &mut body.max_slope_degrees,
+                    0. ..=89.,
+                );
+                number(ui, "Gravity scale", &mut body.gravity_scale, 0. ..=10.);
+                return;
+            }
             egui::ComboBox::from_id_salt("collider-kind")
                 .selected_text(format!("{:?}", body.collider))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut body.collider, ColliderKind::Box, "Box");
                     ui.selectable_value(&mut body.collider, ColliderKind::Sphere, "Sphere");
+                    ui.selectable_value(&mut body.collider, ColliderKind::Capsule, "Capsule");
                 });
             ui.checkbox(&mut body.sensor, "Trigger (sensor)");
             if body.collider == ColliderKind::Sphere {

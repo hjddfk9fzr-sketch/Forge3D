@@ -153,3 +153,83 @@ fn ray_uses_world_units_stable_ids_and_solid_colliders() {
     assert_eq!(hit.distance, 2.5);
     assert!(play.raycast([0.; 3], [0.; 3], 1., None).is_err());
 }
+
+#[test]
+fn reusable_character_lands_jumps_once_and_slides_along_walls() {
+    use forge3d::controls::{InputControls, Key};
+    let mut scene = Scene::empty();
+    let mut hero = Object::new("Character", Shape::Cube);
+    hero.position = [0., 2., 0.];
+    hero.speed = 3.;
+    hero.body = Some(Body::character());
+    scene.add_object(hero).unwrap();
+    for (name, position, size) in [
+        ("floor", [0., -0.5, 0.], [20., 1., 20.]),
+        ("wall", [1.5, 1., 0.], [0.2, 2., 16.]),
+    ] {
+        let mut obj = Object::new(name, Shape::Cube);
+        obj.position = position;
+        obj.body = Some(Body {
+            size,
+            ..Default::default()
+        });
+        scene.add_object(obj).unwrap();
+    }
+    let mut play = Playback::new(scene).unwrap();
+    for _ in 0..90 {
+        play.tick(Vec2::ZERO, STEP);
+    }
+    let floor = play.scene().objects[0].position[1];
+    assert!((0.495..0.53).contains(&floor), "{floor}");
+    let mut controls = InputControls::default();
+    controls.pressed.insert(Key::Space);
+    play.tick_input(Vec2::ZERO, &controls, STEP * 0.5);
+    play.tick(Vec2::ZERO, STEP * 0.5);
+    let mut apex = floor;
+    for i in 0..90 {
+        if i == 7 {
+            play.tick_input(Vec2::ZERO, &controls, STEP);
+        } else {
+            play.tick(Vec2::ZERO, STEP);
+        }
+        apex = apex.max(play.scene().objects[0].position[1]);
+    }
+    assert!(
+        (0.9..1.05).contains(&(apex - floor)),
+        "apex {apex} floor {floor}"
+    );
+    assert!((play.scene().objects[0].position[1] - floor).abs() < 0.02);
+    for _ in 0..90 {
+        play.tick(Vec2::ONE, STEP);
+    }
+    let [x, _, z] = play.scene().objects[0].position;
+    assert!((1.05..1.12).contains(&x) && z > 2.5, "{x}, {z}");
+}
+
+#[test]
+fn character_climbs_only_walkable_slopes() {
+    let height = |limit| {
+        let mut scene = Scene::empty();
+        let mut floor = Object::new("Ramp", Shape::Cube);
+        floor.rotation[2] = 25.;
+        floor.scale = [12., 0.25, 4.];
+        floor.body = Some(Body::default());
+        scene.add_object(floor).unwrap();
+        let mut character = Object::new("Character", Shape::Sphere);
+        character.position = [0., 0.85, 0.];
+        character.speed = 2.;
+        character.body = Some(Body {
+            max_slope_degrees: limit,
+            ..Body::character()
+        });
+        scene.add_object(character).unwrap();
+        let mut play = Playback::new(scene).unwrap();
+        for _ in 0..60 {
+            play.tick(Vec2::X, STEP);
+        }
+        play.scene().objects[1].position[1]
+    };
+    let climb = height(45.);
+    let slide = height(12.);
+    assert!(climb > 1.1 && slide < 0.85, "climb {climb}, slide {slide}");
+}

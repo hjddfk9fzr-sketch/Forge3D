@@ -49,7 +49,8 @@ fn campaign_reloads_checkpoint_and_volume_after_relaunch() {
     assert_eq!(play.current(), "entrance");
     assert_eq!(play.progress().checkpoint.as_deref(), Some("entrance"));
 
-    move_until(&mut play, Vec2::X, "workshop");
+    play.ui_action("use").unwrap();
+    move_until(&mut play, Vec2::NEG_Y, "workshop");
     assert_eq!(play.take_sounds(), ["cue"]);
     assert!(play.take_progress_changed());
     play.progress().save(&path).unwrap();
@@ -158,12 +159,18 @@ fn runtime_prefab_pickup_survives_export_and_leaves_no_body_or_script() {
             .find(|o| o.name == "Workshop token")
             .unwrap()
             .id;
-        let ray = |p: &GamePlayback| p.raycast([1.25, 2., 0.], [0., -1., 0.], 2., None).unwrap();
+        let ray = |p: &GamePlayback| p.raycast([0., 2., -2.8], [0., -1., 0.], 2., None).unwrap();
         assert_eq!(ray(&play).unwrap().object_id, item);
         play.tick(Vec2::ZERO, STEP);
         assert!(play.scene().objects[play.scene().object_index(item).unwrap()].rotation[1] > 0.);
-        for _ in 0..24 {
-            play.tick(Vec2::X, STEP);
+        for _ in 0..80 {
+            play.tick(Vec2::NEG_Y, STEP);
+        }
+        assert!((-1.45..-1.3).contains(&play.scene().objects[0].position[2]));
+        assert!(play.scene().object_index(item).is_ok());
+        play.ui_action("use").unwrap();
+        for _ in 0..27 {
+            play.tick(Vec2::NEG_Y, STEP);
         }
         assert!(play.scene().object_index(item).is_err());
         assert!(ray(&play).is_none_or(|hit| hit.object_id != item));

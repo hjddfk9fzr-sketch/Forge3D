@@ -77,7 +77,7 @@ impl Project {
         first.application.title = "Forge3D · Two Workshops".into();
         first.application.identifier = "com.forge3d.betademo".into();
         first.application.version = env!("CARGO_PKG_VERSION").into();
-        first.application.version_code = 120;
+        first.application.version_code = 130;
         first.objects[0].script = Some(
             r#"fn update(object, dt, input) {
                 if input.x > 0.5 { object.next_scene = "workshop"; }
@@ -116,15 +116,15 @@ impl Project {
 
         let cue: std::sync::Arc<[u8]> = demo_cue()?.into();
         let pilot = &mut entrance.objects[0];
-        pilot.body = Some(crate::physics::Body {
-            kind: crate::physics::BodyKind::Kinematic,
-            ..Default::default()
-        });
+        pilot.body = Some(crate::physics::Body::character());
         pilot
             .components
             .insert("workshop.inventory".into(), 0.into());
         let pilot_id = pilot.id;
-        let mut script = level_script("object.x >= 2.5", "workshop");
+        let mut script = level_script(
+            "object.z <= -3.65 && object.y > 0.0 && object.x.abs() < 1.0",
+            "workshop",
+        );
         script.push_str(
             r#"
 fn camera(view, object, dt, input) {
@@ -161,6 +161,20 @@ fn on_ui(object, event) {{
 }}"#
         ));
         entrance.add_object(door)?;
+        let floor = &mut entrance.objects[3];
+        floor.position = [0., -0.05, -1.5];
+        floor.scale = [6., 1., 7.];
+        floor.body = Some(crate::physics::Body {
+            size: [1., 0.1, 1.],
+            ..Default::default()
+        });
+        for x in [-1.8, 1.8] {
+            let mut wall = Object::new("Workshop wall", Shape::Cube);
+            wall.position = [x, 1., -1.8];
+            wall.scale = [2.4, 2., 0.18];
+            wall.body = Some(Default::default());
+            entrance.add_object(wall)?;
+        }
         let mut item = Object::new("Workshop token", Shape::Sphere);
         item.scale = [0.35; 3];
         item.body = Some(crate::physics::Body::default());
@@ -172,7 +186,7 @@ fn on_ui(object, event) {{
         let root = template.add_object(item)?;
         project.create_prefab("workshop-token", &template, root)?;
         let mut spawner = Object::new("Token spawn", Shape::Empty);
-        spawner.position = [1.25, 0.55, 0.];
+        spawner.position = [0., 0.55, -2.8];
         spawner
             .components
             .insert("workshop.spawn".into(), "workshop-token".into());
@@ -181,7 +195,7 @@ fn on_ui(object, event) {{
             text([0.10, 0.04, 0.80, 0.08], "01  /  THE ENTRANCE"),
             text(
                 [0.10, 0.13, 0.80, 0.07],
-                "Face the door and press E to open it. Move right to the checkpoint.",
+                "Open the door [E], then walk forward through the token.",
             ),
             button([0.78, 0.75, 0.19, 0.09], "use", "Open [E]", UiKey::E),
             button([0.78, 0.87, 0.19, 0.09], "menu", "Menu", UiKey::Escape),

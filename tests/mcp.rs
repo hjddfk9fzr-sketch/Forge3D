@@ -317,13 +317,13 @@ fn mcp_campaign_simulation_exposes_ui_progress_and_sound_events() {
     let result = client.ok(
         "project_simulate",
         json!({
-            "frames":120,"input":[1,0],
-            "actions":[{"frame":0,"button":"quiet"},{"frame":1,"button":"start"}]
+            "frames":120,"input":[0,-1],
+            "actions":[{"frame":0,"button":"quiet"},{"frame":1,"button":"start"},{"frame":12,"button":"use"}]
         }),
     );
     assert_eq!(result["visited"], json!(["menu", "entrance", "workshop"]));
     assert_eq!(result["progress"]["checkpoint"], "workshop");
-    assert_eq!(result["sounds"], json!(["cue", "cue", "cue"]));
+    assert_eq!(result["sounds"], json!(["cue", "cue", "cue", "cue"]));
     assert!(result["script_errors"].as_array().unwrap().is_empty());
     client.ok("project_select_scene", json!({"scene":"entrance"}));
     let query = json!({"origin":[0,1.2,0],"direction":[0,0,-2],"max_distance":2});

@@ -922,9 +922,9 @@ fn tools() -> Vec<Value> {
     }});
     let bindings = json!({"type":"object","properties":{"forward":key,"backward":key,"left":key,"right":key,"arrows":boolean},"additionalProperties":false});
     let body = json!({"anyOf":[{"type":"null"},{"type":"object","properties":{
-        "kind":{"enum":["static","dynamic","kinematic"]},"collider":{"enum":["box","sphere"]},
+        "kind":{"enum":["static","dynamic","kinematic","character"]},"collider":{"enum":["box","sphere","capsule"]},
         "size":vec3,"sensor":boolean,"gravity_scale":{"type":"number","minimum":-10,"maximum":10},
-        "friction":{"type":"number","minimum":0,"maximum":2},"restitution":{"type":"number","minimum":0,"maximum":1},"lock_rotation":boolean
+        "friction":{"type":"number","minimum":0,"maximum":2},"restitution":{"type":"number","minimum":0,"maximum":1},"lock_rotation":boolean,"jump_height":{"type":"number","minimum":0,"maximum":100},"max_slope_degrees":{"type":"number","minimum":0,"maximum":89}
     },"additionalProperties":false}]});
     let expect_events = json!({"type":"array","maxItems":64,"items":{"type":"object","properties":{
         "kind":{"enum":["collision_enter","collision_exit","trigger_enter","trigger_exit"]},"a":id,"b":id

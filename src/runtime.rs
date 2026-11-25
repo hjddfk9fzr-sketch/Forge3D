@@ -167,6 +167,12 @@ impl Object {
         }
     }
 
+    pub fn is_character(&self) -> bool {
+        self.body
+            .as_ref()
+            .is_some_and(|b| b.kind == BodyKind::Character)
+    }
+
     pub fn is_dynamic(&self) -> bool {
         self.body
             .as_ref()
@@ -563,8 +569,10 @@ fn on_event(object, event) {
 
     pub fn set_parent(&mut self, child: u64, parent: Option<u64>) -> Result<(), String> {
         let index = self.object_index(child)?;
-        if parent.is_some() && self.objects[index].is_dynamic() {
-            return Err("Dynamic bodies must be at the scene root.".into());
+        if parent.is_some()
+            && (self.objects[index].is_dynamic() || self.objects[index].is_character())
+        {
+            return Err("Dynamic and character bodies must be at the scene root.".into());
         }
         let mut ancestor = parent;
         while let Some(id) = ancestor {
@@ -746,9 +754,9 @@ fn on_event(object, event) {
             if let Some(body) = &object.body {
                 body.validate()
                     .map_err(|error| format!("{}: {error}", object.name))?;
-                if object.is_dynamic() && object.parent.is_some() {
+                if (object.is_dynamic() || object.is_character()) && object.parent.is_some() {
                     return Err(format!(
-                        "{}: dynamic bodies must be at the scene root.",
+                        "{}: dynamic and character bodies must be at the scene root.",
                         object.name
                     ));
                 }
@@ -1216,7 +1224,7 @@ pub fn update(scene: &mut Scene, movement: Vec2, dt: f32) {
         if !object.is_dynamic() || object.spin != 0. {
             object.rotation[1] = (object.rotation[1] + object.spin * dt).rem_euclid(360.);
         }
-        if !object.is_dynamic() {
+        if !object.is_dynamic() && !object.is_character() {
             object.position[0] += movement.x * object.speed * dt;
             object.position[2] += movement.y * object.speed * dt;
         }
@@ -1322,6 +1330,7 @@ impl Playback {
                 movement,
                 &input_map(movement, controls, &self.scene.camera),
                 dt,
+                false,
             );
             return;
         }
@@ -1331,12 +1340,16 @@ impl Playback {
         while self.accumulated + 1e-8 >= step {
             self.accumulated = (self.accumulated - step).max(0.);
             let input = input_map(movement, &self.pending_controls, &self.scene.camera);
+            let jump = self
+                .pending_controls
+                .pressed
+                .contains(&crate::controls::Key::Space);
             self.pending_controls.clear_edges();
-            self.run_step(movement, &input, physics::STEP);
+            self.run_step(movement, &input, physics::STEP, jump);
         }
     }
 
-    fn run_step(&mut self, movement: Vec2, input: &rhai::Map, dt: f32) {
+    fn run_step(&mut self, movement: Vec2, input: &rhai::Map, dt: f32, jump: bool) {
         update(&mut self.scene, movement, dt);
         self.scripts
             .step(&mut self.scene, input, dt, &mut self.script_errors);
@@ -1344,7 +1357,7 @@ impl Playback {
             .physics
             .borrow_mut()
             .as_mut()
-            .map(|physics| physics.step(&mut self.scene, movement));
+            .map(|physics| physics.step(&mut self.scene, movement, jump));
         if let Some(events) = events {
             self.scripts
                 .events(&mut self.scene, &events, &mut self.script_errors);
