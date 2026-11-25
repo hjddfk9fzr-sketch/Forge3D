@@ -100,6 +100,8 @@ impl View {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Object {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefab: Option<PrefabLink>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub components: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +132,15 @@ pub struct Object {
     pub script: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefabLink {
+    // Preserve local ownership when a later template edit happens to match the local value.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub overrides: std::collections::BTreeSet<Vec<String>>,
+    pub name: String,
+    pub source: u64,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Shape {
     Empty,
@@ -146,6 +157,7 @@ fn casts_shadows() -> bool {
 impl Object {
     pub fn new(name: impl Into<String>, shape: Shape) -> Self {
         Self {
+            prefab: None,
             animation: None,
             surface: None,
             light: None,
@@ -849,6 +861,7 @@ pub struct PreparedScene {
     plane: Mesh,
     models: Vec<Vec<PreparedPart>>,
     renderer: Option<lighting::Renderer>,
+    sky: Option<Material>,
 }
 
 struct PreparedPart {
@@ -872,6 +885,11 @@ impl PreparedScene {
             }
         };
         Self {
+            sky: lighting::sky_material()
+                .inspect_err(|e| {
+                    macroquad::logging::error!("Skybox: {}", e);
+                })
+                .ok(),
             cube: cube_mesh(),
             sphere: sphere_mesh(),
             plane: plane_mesh(),
@@ -947,6 +965,9 @@ impl PreparedScene {
             gpu.lights(camera, &shadow, &scene.lighting, &points);
         } else {
             set_camera(camera);
+        }
+        if let Some(sky) = &self.sky {
+            scene.lighting.skybox.draw(sky, &self.cube, camera.position);
         }
         if grid {
             draw_grid_ex(

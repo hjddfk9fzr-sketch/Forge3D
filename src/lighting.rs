@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Lighting {
+    pub skybox: Skybox,
     pub direction: [f32; 3],
     pub color: [f32; 3],
     pub intensity: f32,
@@ -21,6 +22,7 @@ pub struct Lighting {
 impl Default for Lighting {
     fn default() -> Self {
         Self {
+            skybox: Skybox::Off,
             direction: [0.4, 0.82, 0.41],
             color: [1., 0.96, 0.86],
             intensity: 2.6,
@@ -510,3 +512,106 @@ void main() {
     gl_FragColor = vec4(floor(z)/255.0,fract(z),0.0,1.0);
 }
 "#;
+
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Skybox {
+    #[default]
+    Off,
+    Day,
+    Sunset,
+    Night,
+}
+
+pub(crate) fn sky_material() -> Result<Material, String> {
+    load_material(
+        ShaderSource::Glsl {
+            vertex: r#"#version 100
+precision highp float;
+attribute vec3 position;
+uniform mat4 Projection;
+uniform vec3 Eye;
+varying mediump vec3 ray;
+void main(){
+    ray=position;
+    vec4 clip=Projection*vec4(Eye+position*16.0,1.0);
+    gl_Position=clip.xyww;
+}"#,
+            fragment: r#"#version 100
+precision mediump float;
+varying mediump vec3 ray;
+uniform vec3 Zenith,Horizon,Low;
+uniform float Night;
+void main(){
+    vec3 d=normalize(ray);
+    float h=d.y;
+    vec3 col=mix(Horizon,Zenith,smoothstep(-0.03,0.48,h));
+    vec3 sun=normalize(vec3(-0.35,0.09,-1.0));
+    float dist=length(d-sun);
+    col+=vec3(1.0,0.68,0.35)*(0.16*exp(-4.0*dist)+0.70*(1.0-smoothstep(0.055,0.061,dist)));
+    float ridge=-0.105+0.040*sin(d.x*17.0+d.z*8.0)+0.014*cos(d.z*38.0-d.x*23.0);
+    col=mix(mix(Low,Horizon,0.34),col,smoothstep(ridge-0.004,ridge+0.004,h));
+    float nearRidge=-0.18+0.033*cos(d.x*12.0-d.z*13.0);
+    col=mix(Low,col,smoothstep(nearRidge-0.005,nearRidge+0.005,h));
+    vec3 grid=d*90.0;
+    vec3 cell=floor(grid);
+    float seed=fract(sin(dot(mod(cell,16.0),vec3(2.1,4.7,7.1)))*137.3);
+    float star=(1.0-smoothstep(0.06,0.22,length(fract(grid)-0.5)))*step(0.88,seed);
+    col+=vec3(star*Night*smoothstep(0.0,0.22,h));
+    gl_FragColor=vec4(col,1.0);
+}"#,
+        },
+        MaterialParams {
+            uniforms: vec![
+                UniformDesc::new("Eye", UniformType::Float3),
+                UniformDesc::new("Zenith", UniformType::Float3),
+                UniformDesc::new("Horizon", UniformType::Float3),
+                UniformDesc::new("Low", UniformType::Float3),
+                UniformDesc::new("Night", UniformType::Float1),
+            ],
+            pipeline_params: PipelineParams {
+                depth_write: false,
+                depth_test: Comparison::Always,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+impl Skybox {
+    pub(crate) fn palette(self) -> Option<(Vec3, Vec3, Vec3)> {
+        Some(match self {
+            Self::Off => return None,
+            Self::Day => (
+                vec3(0.08, 0.38, 0.72),
+                vec3(0.68, 0.88, 0.94),
+                vec3(0.19, 0.40, 0.49),
+            ),
+            Self::Sunset => (
+                vec3(0.13, 0.16, 0.43),
+                vec3(1.0, 0.63, 0.38),
+                vec3(0.25, 0.17, 0.32),
+            ),
+            Self::Night => (
+                vec3(0.018, 0.035, 0.14),
+                vec3(0.23, 0.32, 0.54),
+                vec3(0.07, 0.09, 0.19),
+            ),
+        })
+    }
+    pub(crate) fn draw(self, mat: &Material, cube: &Mesh, eye: Vec3) {
+        let Some((top, edge, low)) = self.palette() else {
+            return;
+        };
+        mat.set_uniform("Eye", eye);
+        mat.set_uniform("Zenith", top);
+        mat.set_uniform("Horizon", edge);
+        mat.set_uniform("Low", low);
+        mat.set_uniform("Night", if self == Self::Night { 1f32 } else { 0. });
+        gl_use_material(mat);
+        draw_mesh(cube);
+        gl_use_default_material();
+    }
+}

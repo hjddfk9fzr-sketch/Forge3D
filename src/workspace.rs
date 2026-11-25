@@ -1,3 +1,5 @@
+mod cloud_relay;
+mod linked;
 use crate::gameplay::slot;
 use crate::{
     game::{valid_id, Game},
@@ -77,7 +79,7 @@ impl Project {
         first.application.title = "Forge3D · Two Workshops".into();
         first.application.identifier = "com.forge3d.betademo".into();
         first.application.version = env!("CARGO_PKG_VERSION").into();
-        first.application.version_code = 131;
+        first.application.version_code = 140;
         first.objects[0].script = Some(
             r#"fn update(object, dt, input) {
                 if input.x > 0.5 { object.next_scene = "workshop"; }
@@ -349,6 +351,18 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
                     }
                 }
                 for obj in &stored.scene.objects {
+                    if let Some(link) = &obj.prefab {
+                        if !self
+                            .prefabs
+                            .get(&link.name)
+                            .is_some_and(|p| p.scene.objects.iter().any(|o| o.id == link.source))
+                        {
+                            missing.push(format!(
+                                "{kind} '{owner}', object '{}': missing prefab '{}' node #{}",
+                                obj.name, link.name, link.source
+                            ));
+                        }
+                    }
                     let model = match obj.shape {
                         Shape::Model(i) => Some(i),
                         _ => None,
@@ -645,6 +659,7 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
         let mut indices = BTreeMap::new();
         for (index, _, _) in scene.object_order() {
             let mut object = scene.objects[index].clone();
+            object.prefab = None;
             if object.id == root {
                 object.parent = None;
             } else if let Some(parent) = object.parent.and_then(|parent| indices.get(&parent)) {
@@ -683,7 +698,18 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
                 .ok_or_else(|| format!("Unknown prefab '{id}'."))?,
         )?;
         let mut result = scene.clone();
+        let first = result.objects.len();
         let root = crate::gameplay::instantiate(&prefab, &mut result, parent, id)?;
+        for (copy, (index, _, _)) in result.objects[first..]
+            .iter_mut()
+            .zip(prefab.object_order())
+        {
+            copy.prefab = Some(crate::runtime::PrefabLink {
+                overrides: Default::default(),
+                name: id.into(),
+                source: prefab.objects[index].id,
+            });
+        }
         result.validate()?;
         *scene = result;
         Ok(root)

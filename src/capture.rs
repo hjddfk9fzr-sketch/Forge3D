@@ -28,6 +28,37 @@ pub fn png(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, String> {
         camera.z_near,
         camera.z_far,
     ) * Mat4::look_at_rh(camera.position, camera.target, camera.up);
+    if let Some((top, horizon, low)) = scene.lighting.skybox.palette() {
+        let forward = (camera.target - camera.position).normalize();
+        let right = forward.cross(camera.up).normalize();
+        let up = right.cross(forward);
+        let height_scale = (camera.fovy * 0.5).tan();
+        let width_scale = height_scale * width as f32 / height as f32;
+        let sun = vec3(-0.35, 0.09, -1.).normalize();
+        for (x, y, pixel) in canvas.image.enumerate_pixels_mut() {
+            let d = (forward
+                + right * ((2. * (x as f32 + 0.5) / width as f32 - 1.) * width_scale)
+                + up * ((1. - 2. * (y as f32 + 0.5) / height as f32) * height_scale))
+                .normalize();
+            let t = ((d.y + 0.03) / 0.51).clamp(0., 1.);
+            let mut c = horizon.lerp(top, t * t * (3. - 2. * t));
+            let distance = d.distance(sun);
+            c += vec3(1., 0.68, 0.35)
+                * (0.16 * (-4. * distance).exp()
+                    + 0.7 * ((0.061 - distance) / 0.006).clamp(0., 1.));
+            if d.y
+                < -0.105
+                    + 0.04 * (d.x * 17. + d.z * 8.).sin()
+                    + 0.014 * (d.z * 38. - d.x * 23.).cos()
+            {
+                c = low.lerp(horizon, 0.34);
+            }
+            if d.y < -0.18 + 0.033 * (d.x * 12. - d.z * 13.).cos() {
+                c = low;
+            }
+            *pixel = Rgb(c.to_array().map(|v| (v.clamp(0., 1.) * 255.).round() as u8));
+        }
+    }
     let cube = runtime::cube_mesh();
     let sphere = runtime::sphere_mesh();
     let mut textures = HashMap::new();

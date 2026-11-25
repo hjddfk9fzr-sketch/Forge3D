@@ -119,6 +119,7 @@ enum Action {
     ProjectNew,
     ProjectDemo,
     CampaignDemo,
+    CloudRelay,
     Presentation,
     Script,
     ProjectSave,
@@ -149,6 +150,7 @@ impl Action {
             Self::ProjectNew => "Create project from scene",
             Self::ProjectDemo => "Open two-scene demo",
             Self::CampaignDemo => "Open Workshop Run",
+            Self::CloudRelay => "Open Cloud Relay",
             Self::Presentation => "Game UI Editor",
             Self::Script => "Script Editor",
             Self::ProjectSave => "Save project",
@@ -181,6 +183,7 @@ impl Action {
             Self::ProjectNew | Self::ProjectSave => "Project file (.forge-project.json)",
             Self::ProjectDemo => "Open the two-workshop demonstration project",
             Self::CampaignDemo => "Open the game with a menu and two levels",
+            Self::CloudRelay => "Open the floating-island relay game",
             Self::Presentation => "Design the game overlay for this scene",
             Self::Script => "Rhai source",
             Self::ProjectAdd => "Optional path to an existing .forge.json scene",
@@ -1504,6 +1507,56 @@ impl Editor {
         });
     }
 
+    fn prefab_inspector(&mut self, ui: &mut egui::Ui, index: usize) {
+        let Some(open) = &mut self.project else {
+            return;
+        };
+        let obj = &self.scene.objects[index];
+        let Some(link) = &obj.prefab else { return };
+        let id = obj.id;
+        ui.label(format!("Prefab · {}", link.name));
+        let overrides = match open.project.overrides(&self.scene, id) {
+            Ok(list) => list,
+            Err(e) => {
+                ui.label(e);
+                return;
+            }
+        };
+        for field in overrides {
+            let mut command = None;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(field.path.join(".")).on_hover_text(format!(
+                    "Prefab: {:?}\nInstance: {:?}",
+                    field.inherited, field.local
+                ));
+                if ui.small_button("Revert").clicked() {
+                    command = Some(false);
+                }
+                if ui.small_button("Apply to prefab").clicked() {
+                    command = Some(true);
+                }
+            });
+            let Some(apply) = command else { continue };
+            let result = if apply {
+                open.project
+                    .apply_property(&open.active, &self.scene, id, &field.path)
+                    .and_then(|()| open.project.scene(&open.active))
+                    .map(|scene| {
+                        self.scene = scene;
+                        self.project_dirty = true;
+                        self.history = project::History::default();
+                        self.scene_epoch += 1;
+                    })
+            } else {
+                open.project
+                    .revert_property(&mut self.scene, id, &field.path)
+            };
+            self.status = result.map_or_else(|e| e, |()| "Prefab property updated".into());
+            self.prepared = PreparedScene::new(&self.scene);
+            break;
+        }
+    }
+
     fn inspector(&mut self, ui: &mut egui::Ui, playing: bool) {
         section(ui, "Inspector");
         ui.separator();
@@ -1526,6 +1579,18 @@ impl Editor {
                         .default_open(true)
                         .show(ui, |ui| {
                             let light = &mut self.scene.lighting;
+                            egui::ComboBox::from_label("Skybox")
+                                .selected_text(format!("{:?}", light.skybox))
+                                .show_ui(ui, |ui| {
+                                    use forge3d::lighting::Skybox::*;
+                                    for sky in [Off, Day, Sunset, Night] {
+                                        ui.selectable_value(
+                                            &mut light.skybox,
+                                            sky,
+                                            format!("{sky:?}"),
+                                        );
+                                    }
+                                });
                             let mut direction = light.direction;
                             if vector(ui, "Sun direction", &mut direction, 0.025)
                                 && (0.00001..=1e12)
@@ -1610,6 +1675,7 @@ impl Editor {
                     }
                     return;
                 };
+                self.prefab_inspector(ui, index);
                 self.parent_inspector(ui, index);
                 let object = &mut self.scene.objects[index];
                 self.dirty |= ui.text_edit_singleline(&mut object.name).changed();
@@ -2120,6 +2186,10 @@ impl Editor {
             self.prompt(Action::ProjectNew);
             ui.close_menu();
         }
+        if ui.button("Open Cloud Relay…").clicked() {
+            self.prompt(Action::CloudRelay);
+            ui.close_menu();
+        }
         if ui.button("Open Workshop Run…").clicked() {
             self.prompt(Action::CampaignDemo);
             ui.close_menu();
@@ -2335,6 +2405,7 @@ impl Editor {
             | Action::RenderingDemo
             | Action::Application
             | Action::ProjectDemo
+            | Action::CloudRelay
             | Action::CampaignDemo
             | Action::Presentation
             | Action::ColorShader
@@ -2418,7 +2489,7 @@ impl Editor {
                         | Action::RenderingDemo
                         | Action::Application
                         | Action::ProjectDemo
-                        | Action::CampaignDemo
+                        | Action::CloudRelay | Action::CampaignDemo
                         | Action::Presentation
                         | Action::ColorShader
                         | Action::Dependencies
@@ -2552,7 +2623,7 @@ impl Editor {
                             | Action::RenderingDemo
                             | Action::Open
                             | Action::ProjectDemo
-                            | Action::CampaignDemo
+                            | Action::CloudRelay | Action::CampaignDemo
                     );
                 if discarding {
                     ui.colored_label(Color32::YELLOW, "This will discard unsaved changes.");
@@ -2600,6 +2671,7 @@ impl Editor {
                 | Action::RenderingDemo
                 | Action::Application
                 | Action::ProjectDemo
+                | Action::CloudRelay
                 | Action::CampaignDemo
                 | Action::Presentation
                 | Action::ColorShader
@@ -2709,6 +2781,10 @@ impl Editor {
                 self.browser.refresh();
                 Ok(format!("Saved project {}", path.display()))
             }
+            Action::CloudRelay => {
+                self.open_project(Project::cloud_relay()?, None)?;
+                Ok("Cloud Relay opened".into())
+            }
             Action::CampaignDemo => {
                 self.open_project(Project::campaign_demo()?, None)?;
                 Ok("Workshop Run opened".into())
@@ -2789,6 +2865,7 @@ impl Editor {
                 let open = self.project.as_mut().ok_or("Open a project first.")?;
                 open.project
                     .create_prefab(id, &self.scene, self.scene.objects[index].id)?;
+                open.project.link_source(id, &mut self.scene)?;
                 self.project_dirty = true;
                 Ok(format!("Created prefab {id}"))
             }

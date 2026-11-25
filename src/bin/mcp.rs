@@ -248,6 +248,7 @@ impl Session {
                 let root = field(&args, "root")?;
                 let project = self.project.as_mut().ok_or("Open or create a project first.")?;
                 project.project.create_prefab(&name, &self.scene, root)?;
+                project.project.link_source(&name, &mut self.scene)?;
                 self.project_info()
             }
             "prefab_instantiate" => {

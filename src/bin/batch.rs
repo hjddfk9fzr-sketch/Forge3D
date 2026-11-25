@@ -66,6 +66,7 @@ fn run() -> Result<(), String> {
         (Some("export"), [_, source, destination]) => {
             export::collection(&load_game(Path::new(source))?, Path::new(destination))
         }
+        (Some("cloud-relay"), [_, path]) => Project::cloud_relay()?.save(Path::new(path), false),
         (Some("campaign-demo"), [_, path]) => {
             Project::campaign_demo()?.save(Path::new(path), false)
         }
@@ -202,6 +203,7 @@ fn run() -> Result<(), String> {
   prefab-create PROJECT PREFAB SCENE_ID OBJECT_ID | prefab-insert PROJECT PREFAB SCENE_ID
   export SCENE_OR_PROJECT DIRECTORY | build SCENE_OR_PROJECT DIRECTORY PROFILE [TARGET]
   retry BUILD_DIRECTORY NEW_DIRECTORY
+  cloud-relay PROJECT
   package-editor TARGET EXECUTABLE OUTPUT"
             .into()),
     }
