@@ -75,7 +75,7 @@ fn gltf_and_glb_preserve_node_transforms() {
     });
 
     let mut json_bytes = serde_json::to_vec(&document).unwrap();
-    while json_bytes.len() % 4 != 0 {
+    while !json_bytes.len().is_multiple_of(4) {
         json_bytes.push(b' ');
     }
     let mut glb = b"glTF\x02\x00\x00\x00".to_vec();

@@ -6,7 +6,6 @@ use macroquad::prelude::Vec3;
 use std::fs;
 
 const ASCII: &str = include_str!("fixtures/model-ascii.fbx");
-const BINARY: &[u8] = include_bytes!("fixtures/model-binary.fbx");
 
 #[test]
 fn ascii_fbx_triangulates_and_preserves_transforms_normals_uvs_and_material() {
@@ -23,7 +22,7 @@ fn ascii_fbx_triangulates_and_preserves_transforms_normals_uvs_and_material() {
             && (2. ..=3.).contains(&v.position[1])
             && v.normal[2] > 0.99));
     assert!(part.vertices.iter().any(|vertex| vertex.uv == [1., 0.]));
-    for triangle in part.vertices.chunks_exact(3) {
+    for triangle in part.vertices.as_chunks::<3>().0 {
         let p = |i: usize| Vec3::from_array(triangle[i].position);
         assert!((p(1) - p(0)).cross(p(2) - p(0)).z > 0.);
     }
@@ -59,6 +58,7 @@ fn fbx_external_texture_must_be_inside_the_mcp_project() {
     fs::create_dir(&root).unwrap();
     let fixture = |name: &str| {
         ASCII
+            .replace("\r\n", "\n")
             .replace(
                 "\n}\nConnections:",
                 &format!(

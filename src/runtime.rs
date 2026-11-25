@@ -1,11 +1,11 @@
 use crate::{
     animation::{self, Influence, Player, Rig},
-    controls::Bindings,
+    controls::{Bindings, InputControls},
     lighting::{self, Lighting, PointLight, Surface},
     physics::{self, Body, BodyKind, ColliderKind, Event, Physics},
     presentation::{Overlay, Presentation},
     progress::{self, Progress},
-    scripting::{Effect, Scripts, DEFAULT_SCRIPT},
+    scripting::{input_map, Effect, Scripts, DEFAULT_SCRIPT},
     settings::{Application, SCENE_VERSION},
 };
 use macroquad::prelude::*;
@@ -1215,6 +1215,7 @@ pub struct Playback {
     script_errors: Vec<String>,
     physics: Option<Physics>,
     accumulated: f64,
+    pending_controls: InputControls,
     events: Vec<Event>,
     dropped_events: usize,
 }
@@ -1227,13 +1228,19 @@ impl Playback {
         let mut script_errors = Vec::new();
         scripts.start(&mut scene, &mut script_errors);
         let physics = Physics::new(&scene)?;
-        scripts.camera(&mut scene, Vec2::ZERO, 0., &mut script_errors);
+        scripts.camera(
+            &mut scene,
+            &input_map(Vec2::ZERO, &InputControls::default()),
+            0.,
+            &mut script_errors,
+        );
         Ok(Self {
             scene,
             scripts,
             script_errors,
             physics,
             accumulated: 0.,
+            pending_controls: InputControls::default(),
             events: Vec::new(),
             dropped_events: 0,
         })
@@ -1244,27 +1251,34 @@ impl Playback {
     }
 
     pub fn tick(&mut self, movement: Vec2, dt: f32) {
+        self.tick_input(movement, &InputControls::default(), dt)
+    }
+
+    pub fn tick_input(&mut self, movement: Vec2, controls: &InputControls, dt: f32) {
         let dt = if dt.is_finite() {
             dt.clamp(0., 0.1)
         } else {
             0.
         };
         if self.physics.is_none() {
-            self.run_step(movement, dt);
+            self.run_step(movement, &input_map(movement, controls), dt);
             return;
         }
+        self.pending_controls.accumulate(controls);
         self.accumulated += f64::from(dt);
         let step = f64::from(physics::STEP);
         while self.accumulated + 1e-8 >= step {
             self.accumulated = (self.accumulated - step).max(0.);
-            self.run_step(movement, physics::STEP);
+            let input = input_map(movement, &self.pending_controls);
+            self.pending_controls.clear_edges();
+            self.run_step(movement, &input, physics::STEP);
         }
     }
 
-    fn run_step(&mut self, movement: Vec2, dt: f32) {
+    fn run_step(&mut self, movement: Vec2, input: &rhai::Map, dt: f32) {
         update(&mut self.scene, movement, dt);
         self.scripts
-            .step(&mut self.scene, movement, dt, &mut self.script_errors);
+            .step(&mut self.scene, input, dt, &mut self.script_errors);
         if let Some(physics) = &mut self.physics {
             let events = physics.step(&mut self.scene, movement);
             self.scripts
@@ -1279,7 +1293,7 @@ impl Playback {
             }
         }
         self.scripts
-            .camera(&mut self.scene, movement, dt, &mut self.script_errors);
+            .camera(&mut self.scene, input, dt, &mut self.script_errors);
     }
 
     pub(crate) fn has_scene_request(&self) -> bool {
@@ -1405,7 +1419,12 @@ pub async fn run_measured(
             }
         }
         let before = playback.current().to_owned();
-        let switched = playback.tick(movement.clamp_length_max(1.), get_frame_time());
+        let input = if automated {
+            InputControls::default()
+        } else {
+            InputControls::capture(Vec2::ZERO)
+        };
+        let switched = playback.tick_input(movement.clamp_length_max(1.), &input, get_frame_time());
         let sounds = playback.take_sounds();
         overlay
             .play(

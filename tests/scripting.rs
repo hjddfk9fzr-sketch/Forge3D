@@ -101,3 +101,53 @@ fn old_scenes_open_and_invalid_scripts_block_export() {
     assert!(error.contains("Legacy"));
     assert!(!destination.exists());
 }
+
+#[test]
+fn keyboard_and_mouse_edges_survive_until_one_fixed_step() {
+    use forge3d::controls::{Button, InputControls, Key};
+
+    let mut scene = Scene::physics_demo();
+    let mut object = Object::new("Input observer", Shape::Empty);
+    object.script = Some(
+        r#"
+        fn update(object, dt, input) {
+            if input.keys.contains("leftshift") { object.rz += 10.0; }
+            if input.pressed.contains("f12") && input.pressed.contains("kpenter") {
+                object.x += input.mouse.x;
+            }
+            if input.released.contains("key7") && input.mouse.released.contains("middle") {
+                object.z += input.mouse.wheel_y;
+            }
+            if input.mouse.pressed.contains("right") && input.mouse.down.contains("right") {
+                object.y += input.mouse.y;
+            }
+            object
+        }
+        "#
+        .into(),
+    );
+    let index = scene.objects.len();
+    scene.objects.push(object);
+
+    let mut play = Playback::new(scene).unwrap();
+    let mut controls = InputControls {
+        keys: [Key::LeftShift].into(),
+        pressed: [Key::F12, Key::KpEnter].into(),
+        released: [Key::Key7].into(),
+        ..Default::default()
+    };
+    controls.mouse.position = [16., 5.];
+    controls.mouse.wheel = [0., 2.];
+    controls.mouse.down.insert(Button::Right);
+    controls.mouse.pressed.insert(Button::Right);
+    controls.mouse.released.insert(Button::Middle);
+    play.tick_input(Vec2::ZERO, &controls, 0.005);
+    assert_eq!(play.scene().objects[index].position, [0.; 3]);
+    controls.clear_edges();
+    play.tick_input(Vec2::ZERO, &controls, 0.035);
+
+    let object = &play.scene().objects[index];
+    assert_eq!(object.position, [16., 5., 2.]);
+    assert_eq!(object.rotation[2], 20.);
+    assert!(play.take_script_errors().is_empty());
+}

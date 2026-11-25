@@ -124,7 +124,7 @@ pub fn png(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, String> {
                     } else {
                         None
                     };
-                    for face in part.indices.chunks_exact(3) {
+                    for face in part.indices.as_chunks::<3>().0 {
                         let triangle = [face[0], face[1], face[2]].map(|index| {
                             let index = index as usize;
                             let vertex = pose.as_ref().map_or_else(
@@ -171,7 +171,7 @@ impl Canvas {
         mvp: Mat4,
         paint: impl Fn(Vec4, Vec3) -> Vec4,
     ) -> Result<(), String> {
-        for face in mesh.indices.chunks_exact(3) {
+        for face in mesh.indices.as_chunks::<3>().0 {
             let triangle = [face[0], face[1], face[2]].map(|index| {
                 let vertex = mesh.vertices[usize::from(index)];
                 Vertex {

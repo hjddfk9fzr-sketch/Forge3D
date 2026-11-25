@@ -1,5 +1,6 @@
 //! Embedded scenes and the runtime scene switcher.
 use crate::{
+    controls::InputControls,
     progress::Progress,
     runtime::{Playback, Scene},
     scripting::Effect,
@@ -118,8 +119,12 @@ impl GamePlayback {
     /// Applies the first script request once per rendered frame. Each scene
     /// starts with fresh physics and script state, including when re-entered.
     pub fn tick(&mut self, movement: Vec2, dt: f32) -> bool {
+        self.tick_input(movement, &InputControls::default(), dt)
+    }
+
+    pub fn tick_input(&mut self, movement: Vec2, controls: &InputControls, dt: f32) -> bool {
         if !self.play.has_scene_request() {
-            self.play.tick(movement, dt);
+            self.play.tick_input(movement, controls, dt);
         }
         self.sounds.clear();
         let mut next = None;

@@ -1,9 +1,17 @@
+#[path = "support/script_editor.rs"]
+mod script_editor;
+#[path = "support/ui_designer.rs"]
+mod ui_designer;
+
+use script_editor::{ScriptEditor, ScriptTarget};
+use ui_designer::UiDesigner;
+
 use egui_macroquad::egui::{self, Color32, RichText};
 use forge3d::{
     animation, capture, controls, export,
     game::{Game, GamePlayback},
     import, jobs, lighting, physics,
-    presentation::{Overlay, Presentation},
+    presentation::Overlay,
     project,
     runtime::{Object, PreparedScene, Scene, ScriptAsset, Shape, View},
     scripting,
@@ -112,6 +120,7 @@ enum Action {
     ProjectDemo,
     CampaignDemo,
     Presentation,
+    Script,
     ProjectSave,
     ProjectAdd,
     PrefabCreate,
@@ -135,7 +144,8 @@ impl Action {
             Self::ProjectNew => "Create project from scene",
             Self::ProjectDemo => "Open two-scene demo",
             Self::CampaignDemo => "Open Workshop Run",
-            Self::Presentation => "Game UI and audio",
+            Self::Presentation => "Game UI Editor",
+            Self::Script => "Script Editor",
             Self::ProjectSave => "Save project",
             Self::ProjectAdd => "Add scene to project",
             Self::PrefabCreate => "Create prefab",
@@ -152,7 +162,8 @@ impl Action {
             Self::ProjectNew | Self::ProjectSave => "Project file (.forge-project.json)",
             Self::ProjectDemo => "Open the two-workshop demonstration project",
             Self::CampaignDemo => "Open the game with a menu and two levels",
-            Self::Presentation => "Scene UI and sound definitions (JSON)",
+            Self::Presentation => "Design the game overlay for this scene",
+            Self::Script => "Rhai source",
             Self::ProjectAdd => "Optional path to an existing .forge.json scene",
             Self::PrefabCreate => "Prefab ID (lowercase letters, digits or hyphens)",
             Self::Import => "Model file (.obj, .fbx, .gltf or .glb)",
@@ -170,7 +181,8 @@ struct Dialog {
     action: Action,
     path: String,
     scene_id: String,
-    presentation: String,
+    presentation: Option<UiDesigner>,
+    script: Option<ScriptEditor>,
     error: Option<String>,
     profile: jobs::Profile,
     target: Option<jobs::Target>,
@@ -360,6 +372,7 @@ struct Editor {
     script_errors: Vec<String>,
     physics_events: Vec<String>,
     show_colliders: bool,
+    game_keyboard: bool,
     grid: bool,
     status: String,
 }
@@ -412,6 +425,7 @@ impl Editor {
             script_errors: Vec::new(),
             physics_events: Vec::new(),
             show_colliders: true,
+            game_keyboard: false,
             grid: true,
             status: "Light & Motion demo loaded".into(),
         }
@@ -503,6 +517,8 @@ impl Editor {
                             ui.close_menu();
                         }
                         ui.checkbox(&mut self.show_colliders, "Collider guides");
+                        ui.checkbox(&mut self.game_keyboard, "Send all keys to Play")
+                            .on_hover_text("Use the toolbar to stop, pause, or step in Play.");
                         ui.checkbox(&mut self.swap_docks, "Swap side panels");
                         ui.separator();
                         ui.menu_button(format!("UI scale ({}%)", self.ui_scale), |ui| {
@@ -519,7 +535,7 @@ impl Editor {
                     });
                     ui.menu_button("Tools", |ui| {
                         if ui
-                            .add_enabled(!playing, egui::Button::new("Game UI and audio…"))
+                            .add_enabled(!playing, egui::Button::new("Game UI Editor…"))
                             .clicked()
                         {
                             self.prompt(Action::Presentation);
@@ -758,6 +774,15 @@ impl Editor {
                 let response = ui.allocate_rect(self.viewport, egui::Sense::click_and_drag());
                 if !playing && self.dialog.is_none() {
                     self.viewport_input(ui, &response);
+                    response.context_menu(|ui| {
+                        if self.selected.is_some() {
+                            if let Some(command) = Self::object_menu(ui) {
+                                self.command(command);
+                            }
+                            ui.separator();
+                        }
+                        self.context_create(ui);
+                    });
                     self.transform_handles(ui);
                 }
             });
@@ -780,7 +805,7 @@ impl Editor {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) -> bool {
-        if self.dialog.is_some() {
+        if self.dialog.is_some() || self.preview.is_some() && self.game_keyboard {
             return false;
         }
         let focused = ctx.memory(|memory| memory.focused());
@@ -1017,13 +1042,29 @@ impl Editor {
                         } else {
                             entry.name.clone()
                         };
-                        if ui
-                            .add_enabled(
-                                !playing || entry.kind == "directory",
-                                egui::Button::new(label),
-                            )
-                            .clicked()
-                        {
+                        let item = ui.add_enabled(
+                            !playing || entry.kind == "directory",
+                            egui::Button::new(label),
+                        );
+                        let mut activate = item.clicked();
+                        item.context_menu(|ui| {
+                            let label = match entry.kind {
+                                "directory" | "scene" | "project" => Some("Open"),
+                                "model" | "script" => Some("Import…"),
+                                _ => None,
+                            };
+                            if let Some(label) = label {
+                                if ui.button(label).clicked() {
+                                    activate = true;
+                                    ui.close_menu();
+                                }
+                            }
+                            if ui.button("Copy path").clicked() {
+                                ui.ctx().copy_text(path.display().to_string());
+                                ui.close_menu();
+                            }
+                        });
+                        if activate {
                             match entry.kind {
                                 "directory" => directory = Some(path),
                                 "scene" | "project" => action = Some((Action::Open, path)),
@@ -1096,6 +1137,7 @@ impl Editor {
                 }
             });
             ui.separator();
+            let mut context = None;
             egui::ScrollArea::vertical()
                 .id_salt("objects")
                 .max_height(ui.available_height())
@@ -1155,10 +1197,15 @@ impl Editor {
                             } else {
                                 ui.add_space(18.);
                             }
-                            selected = ui
+                            let item = ui
                                 .selectable_label(self.selected == Some(i), label)
-                                .on_hover_text(format!("Object #{id}"))
-                                .clicked();
+                                .on_hover_text(format!("Object #{id}"));
+                            selected = item.clicked() || item.secondary_clicked();
+                            item.context_menu(|ui| {
+                                if let Some(command) = Self::object_menu(ui) {
+                                    context = Some((i, command));
+                                }
+                            });
                         });
                         if filter.is_empty() && self.collapsed.contains(&id) {
                             hidden_depth = Some(depth);
@@ -1168,6 +1215,10 @@ impl Editor {
                         }
                     }
                 });
+            if let Some((index, command)) = context {
+                self.selected = Some(index);
+                self.command(command);
+            }
         });
     }
 
@@ -1181,11 +1232,37 @@ impl Editor {
             if ui.small_button("Import .rhai…").clicked() {
                 self.prompt(Action::ImportScript);
             }
-            for script in &self.scene.scripts {
+            if ui.small_button("New shared script").clicked() {
+                let name = (1..)
+                    .map(|index| format!("script-{index}.rhai"))
+                    .find(|name| self.scene.scripts.iter().all(|script| &script.name != name))
+                    .expect("finite number of scripts");
+                self.show_script(ScriptEditor::new(
+                    ScriptTarget::NewShared,
+                    name,
+                    scripting::DEFAULT_SCRIPT.into(),
+                ));
+            }
+            let mut edit = None;
+            for (index, script) in self.scene.scripts.iter().enumerate() {
                 if !script.name.to_lowercase().contains(&filter) {
                     continue;
                 }
-                ui.label(RichText::new(&script.name).monospace());
+                let item = ui
+                    .button(RichText::new(&script.name).monospace())
+                    .on_hover_text("Edit shared script");
+                if item.clicked() {
+                    edit = Some(index);
+                }
+                item.context_menu(|ui| {
+                    if ui.button("Edit script…").clicked() {
+                        edit = Some(index);
+                        ui.close_menu();
+                    }
+                });
+            }
+            if let Some(index) = edit {
+                self.open_script(ScriptTarget::Shared(index));
             }
             if self.scene.models.is_empty() {
                 ui.label(RichText::new("Import OBJ, FBX, glTF or GLB.").color(MUTED));
@@ -1395,44 +1472,70 @@ impl Editor {
                 object.script = None;
             }
         }
-        let source = if let Some(i) = selected {
-            ui.label(
-                RichText::new("Shared source · affects all linked objects")
-                    .small()
-                    .color(MUTED),
-            );
-            Some(&mut self.scene.scripts[i].source)
-        } else {
-            object.script.as_mut()
-        };
-        let mut error = None;
-        if let Some(source) = source {
-            ui.add(
-                egui::TextEdit::multiline(source)
-                    .code_editor()
-                    .desired_width(ui.available_width())
-                    .desired_rows(8),
-            );
-            let remove = ui
+        let target = selected.map(ScriptTarget::Shared).or_else(|| {
+            object
+                .script
+                .as_ref()
+                .map(|_| ScriptTarget::Inline(object.id))
+        });
+        if let Some(target) = target {
+            if matches!(target, ScriptTarget::Shared(_)) {
+                ui.label(
+                    RichText::new("Shared source · affects all linked objects")
+                        .small()
+                        .color(MUTED),
+                );
+            }
+            let (edit, detach) = ui
                 .horizontal_wrapped(|ui| {
-                    if ui.button("Check script").clicked() {
-                        match scripting::validate_source(source) {
-                            Ok(()) => self.status = format!("{}: script compiled", object.name),
-                            Err(message) => error = Some(format!("{}: {message}", object.name)),
-                        }
-                    }
-                    ui.button("Detach script").clicked()
+                    (
+                        ui.button("Edit script…").clicked(),
+                        ui.button("Detach script").clicked(),
+                    )
                 })
                 .inner;
-            if remove {
+            if detach {
                 object.script = None;
                 object.script_asset = None;
+            } else if edit {
+                self.open_script(target);
             }
         } else if ui.button("+ Attach inline script").clicked() {
-            object.script = Some(scripting::DEFAULT_SCRIPT.into());
+            let target = ScriptTarget::Inline(object.id);
+            self.open_script(target);
         }
-        if let Some(error) = error {
-            self.record_script_error(error);
+    }
+
+    fn open_script(&mut self, target: ScriptTarget) {
+        let (name, source) = match target {
+            ScriptTarget::Inline(id) => {
+                let Ok(index) = self.scene.object_index(id) else {
+                    return;
+                };
+                let object = &self.scene.objects[index];
+                (
+                    format!("{} · inline", object.name),
+                    object
+                        .script
+                        .as_deref()
+                        .unwrap_or(scripting::DEFAULT_SCRIPT),
+                )
+            }
+            ScriptTarget::Shared(index) => {
+                let Some(asset) = self.scene.scripts.get(index) else {
+                    return;
+                };
+                (asset.name.clone(), asset.source.as_str())
+            }
+            ScriptTarget::NewShared => return,
+        };
+        self.show_script(ScriptEditor::new(target, name, source.to_owned()));
+    }
+
+    fn show_script(&mut self, editor: ScriptEditor) {
+        self.prompt(Action::Script);
+        if let Some(dialog) = &mut self.dialog {
+            dialog.script = Some(editor);
         }
     }
 
@@ -1593,11 +1696,40 @@ impl Editor {
         if response.hovered() && scroll != 0. {
             self.view.distance = (self.view.distance * (-scroll * 0.006).exp()).clamp(0.25, 500.);
         }
-        if response.clicked() {
+        if response.clicked() || response.secondary_clicked() {
             if let Some(pointer) = response.interact_pointer_pos() {
                 self.selected = pick(&self.scene, &self.view, self.viewport, pointer);
             }
         }
+    }
+
+    fn object_menu(ui: &mut egui::Ui) -> Option<Command> {
+        [Command::Frame, Command::Duplicate, Command::Delete]
+            .into_iter()
+            .find(|command| {
+                if ui.add(command.menu_button(ui)).clicked() {
+                    ui.close_menu();
+                    true
+                } else {
+                    false
+                }
+            })
+    }
+
+    fn context_create(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Create object", |ui| {
+            for (name, shape) in [
+                ("Empty", Shape::Empty),
+                ("Cube", Shape::Cube),
+                ("Sphere", Shape::Sphere),
+                ("Plane", Shape::Plane),
+            ] {
+                if ui.button(name).clicked() {
+                    self.add(Object::new(name, shape));
+                    ui.close_menu();
+                }
+            }
+        });
     }
 
     fn frame_selection(&mut self) {
@@ -1659,7 +1791,8 @@ impl Editor {
                 } else {
                     get_frame_time()
                 };
-                let switched = preview.tick(movement, dt);
+                let input = controls::InputControls::capture(vec2(overlay_rect.x, overlay_rect.y));
+                let switched = preview.tick_input(movement, &input, dt);
                 let sounds = preview.take_sounds();
                 overlay
                     .play(
@@ -1954,6 +2087,7 @@ impl Editor {
             | Action::ProjectDemo
             | Action::CampaignDemo
             | Action::Presentation
+            | Action::Script
             | Action::ProjectAdd => Path::new(""),
             Action::Open | Action::Save => self
                 .path
@@ -1975,11 +2109,9 @@ impl Editor {
             action,
             path: path.display().to_string(),
             scene_id: String::new(),
-            presentation: if matches!(action, Action::Presentation) {
-                serde_json::to_string_pretty(&self.scene.presentation).unwrap_or_default()
-            } else {
-                String::new()
-            },
+            presentation: matches!(action, Action::Presentation)
+                .then(|| UiDesigner::new(self.scene.presentation.clone())),
+            script: None,
             error: None,
             profile: jobs::Profile::Debug,
             target: None,
@@ -1989,6 +2121,7 @@ impl Editor {
 
     fn show_dialog(&mut self, ctx: &egui::Context) {
         if self.dialog.is_some()
+            && !ctx.memory(|memory| memory.any_popup_open())
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             self.dialog = None;
@@ -1999,9 +2132,15 @@ impl Editor {
         };
         let mut submit = false;
         let mut open = true;
-        egui::Window::new(dialog.action.label())
+        let editing = matches!(dialog.action, Action::Presentation | Action::Script);
+        let window = egui::Window::new(dialog.action.label())
+            .default_width(if editing {
+                ctx.screen_rect().width().min(840.) - 32.
+            } else {
+                420.
+            })
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .resizable(false)
+            .resizable(editing)
             .collapsible(false)
             .open(&mut open)
             .show(ctx, |ui| {
@@ -2015,20 +2154,22 @@ impl Editor {
                         | Action::ProjectDemo
                         | Action::CampaignDemo
                         | Action::Presentation
+                        | Action::Script
                 ) {
                     ui.add(egui::TextEdit::singleline(&mut dialog.path).desired_width(420.));
                 }
-                if matches!(dialog.action, Action::Presentation) {
+                if let Some(editor) = &mut dialog.presentation {
+                    let aspect = if self.scene.application.orientation == Orientation::Portrait {
+                        9. / 16.
+                    } else {
+                        self.viewport.aspect_ratio().clamp(0.3, 5.)
+                    };
                     egui::ScrollArea::vertical()
-                        .max_height(340.)
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut dialog.presentation)
-                                    .code_editor()
-                                    .desired_rows(15)
-                                    .desired_width(490.),
-                            );
-                        });
+                        .max_height(ctx.screen_rect().height() * 0.67)
+                        .show(ui, |ui| editor.show(ui, aspect));
+                }
+                if let Some(editor) = &mut dialog.script {
+                    editor.show(ui);
                 }
                 if matches!(dialog.action, Action::ProjectAdd) {
                     ui.label("Scene ID");
@@ -2094,13 +2235,19 @@ impl Editor {
                 submit = ui
                     .button(if discarding {
                         "Discard changes and continue"
-                    } else if matches!(dialog.action, Action::Application | Action::Presentation) {
+                    } else if matches!(
+                        dialog.action,
+                        Action::Application | Action::Presentation | Action::Script
+                    ) {
                         "Apply"
                     } else {
                         dialog.action.label()
                     })
                     .clicked();
             });
+        if let Some(window) = window {
+            ctx.memory_mut(|memory| memory.set_modal_layer(window.response.layer_id));
+        }
         if submit {
             match self.perform(&dialog) {
                 Ok(message) => {
@@ -2125,6 +2272,7 @@ impl Editor {
                 | Action::ProjectDemo
                 | Action::CampaignDemo
                 | Action::Presentation
+                | Action::Script
                 | Action::ProjectAdd
         ) && path.as_os_str().is_empty()
         {
@@ -2188,11 +2336,51 @@ impl Editor {
                 Ok("Workshop Run opened".into())
             }
             Action::Presentation => {
-                let presentation: Presentation = serde_json::from_str(&dialog.presentation)
-                    .map_err(|error| error.to_string())?;
-                presentation.validate()?;
-                self.scene.presentation = presentation;
+                let editor = dialog
+                    .presentation
+                    .as_ref()
+                    .ok_or("UI editor is unavailable.")?;
+                editor.draft.validate()?;
+                self.scene.presentation = editor.draft.clone();
                 Ok("Game UI and audio updated".into())
+            }
+            Action::Script => {
+                let editor = dialog
+                    .script
+                    .as_ref()
+                    .ok_or("Script editor is unavailable.")?;
+                scripting::validate_source(&editor.source)?;
+                match editor.target {
+                    ScriptTarget::Inline(id) => {
+                        let index = self.scene.object_index(id)?;
+                        let object = &mut self.scene.objects[index];
+                        if object.script_asset.is_some() {
+                            return Err("Object now uses a shared script.".into());
+                        }
+                        object.script = Some(editor.source.clone());
+                    }
+                    ScriptTarget::Shared(index) => {
+                        self.scene
+                            .scripts
+                            .get_mut(index)
+                            .ok_or("Script asset was removed.")?
+                            .source = editor.source.clone();
+                    }
+                    ScriptTarget::NewShared => {
+                        let name = editor.name.trim();
+                        if name.is_empty() {
+                            return Err("Enter a name for the shared script.".into());
+                        }
+                        if self.scene.scripts.iter().any(|script| script.name == name) {
+                            return Err("A script with this name already exists.".into());
+                        }
+                        self.scene.scripts.push(ScriptAsset {
+                            name: name.to_owned(),
+                            source: editor.source.clone(),
+                        });
+                    }
+                }
+                Ok("Script compiled and applied".into())
             }
             Action::ProjectDemo => {
                 self.open_project(Project::demo()?, None)?;

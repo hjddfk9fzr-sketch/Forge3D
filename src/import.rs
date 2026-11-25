@@ -91,7 +91,9 @@ fn obj(path: &Path, root: Option<&Path>) -> Result<Vec<Part>, String> {
                 .transpose()?;
             let vertices = mesh
                 .positions
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .enumerate()
                 .map(|(index, p)| {
                     let uv = mesh
@@ -415,7 +417,7 @@ fn finish(
     texture: Option<Vec<u8>>,
 ) -> Result<Part, String> {
     if indices.is_empty()
-        || indices.len() % 3 != 0
+        || !indices.len().is_multiple_of(3)
         || indices.iter().any(|&i| i as usize >= vertices.len())
     {
         return Err("Invalid triangle indices.".into());
@@ -427,7 +429,7 @@ fn finish(
         return Err("Invalid model positions.".into());
     }
     let mut accumulated = vec![Vec3::ZERO; vertices.len()];
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let [a, b, c] =
             std::array::from_fn(|i| Vec3::from_array(vertices[triangle[i] as usize].position));
         let normal = (b - a).cross(c - a);

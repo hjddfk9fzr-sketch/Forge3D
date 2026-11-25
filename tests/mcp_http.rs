@@ -74,9 +74,8 @@ fn http_transport_authenticates_and_isolates_scene_sessions() {
     let address = listening
         .trim()
         .strip_prefix("Forge3D MCP listening on ")
-        .unwrap()
-        .strip_suffix("/mcp")
-        .unwrap();
+        .and_then(|line| line.strip_suffix("/mcp"))
+        .unwrap_or_else(|| panic!("MCP server failed to announce its address: {listening:?}"));
     let authorization = ("Authorization", "Bearer local-integration-test");
     let initialize = json!({"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-11-25"}}).to_string();
 

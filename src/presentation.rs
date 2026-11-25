@@ -39,29 +39,7 @@ pub enum WidgetKind {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum UiKey {
-    Enter,
-    Escape,
-    Space,
-    C,
-    Minus,
-    Equal,
-}
-
-impl UiKey {
-    fn key(self) -> KeyCode {
-        match self {
-            Self::Enter => KeyCode::Enter,
-            Self::Escape => KeyCode::Escape,
-            Self::Space => KeyCode::Space,
-            Self::C => KeyCode::C,
-            Self::Minus => KeyCode::Minus,
-            Self::Equal => KeyCode::Equal,
-        }
-    }
-}
+pub use crate::controls::Key as UiKey;
 
 impl Presentation {
     pub fn is_empty(&self) -> bool {
@@ -118,7 +96,7 @@ impl Presentation {
     }
 }
 
-fn validate_png(png: &[u8]) -> Result<(), String> {
+pub fn validate_png(png: &[u8]) -> Result<(), String> {
     if png.len() > 1024 * 1024 || !png.starts_with(b"\x89PNG\r\n\x1a\n") || png.len() < 24 {
         return Err("UI images must be PNG files under 1 MiB.".into());
     }
@@ -196,7 +174,7 @@ impl Overlay {
                 return None;
             };
             let rect = bounds(viewport, widget);
-            (key.is_some_and(|key| is_key_pressed(key.key()))
+            (key.is_some_and(|key| is_key_pressed(key.code()))
                 || (pressed && rect.contains(point))
                 || touch
                     .as_ref()

@@ -140,32 +140,6 @@ pub fn migrate(source: &Path, destination: &Path) -> Result<u32, String> {
     Ok(scene.version)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn interrupted_overwrite_keeps_the_last_saved_scene() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("scene.forge.json");
-        let scene = Scene::demo();
-        save(&scene, &path, false).unwrap();
-        let saved = fs::read(&path).unwrap();
-
-        assert!(publish_scene(&path, true, |staged| {
-            staged.write_all(b"{\"version\":").unwrap();
-            Err("interrupted write".into())
-        })
-        .is_err());
-        assert_eq!(fs::read(&path).unwrap(), saved);
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
-        assert_eq!(load(&path).unwrap().title, scene.title);
-
-        save(&Scene::empty(), &path, true).unwrap();
-        assert!(load(&path).unwrap().objects.is_empty());
-    }
-}
-
 /// Duplicates a subtree and keeps its references to scene-local resources.
 pub fn duplicate_object(scene: &mut Scene, root: u64) -> Result<u64, String> {
     use std::collections::HashMap;
@@ -197,4 +171,30 @@ pub fn duplicate_object(scene: &mut Scene, root: u64) -> Result<u64, String> {
     candidate.validate_objects()?;
     *scene = candidate;
     Ok(copy_root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_overwrite_keeps_the_last_saved_scene() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scene.forge.json");
+        let scene = Scene::demo();
+        save(&scene, &path, false).unwrap();
+        let saved = fs::read(&path).unwrap();
+
+        assert!(publish_scene(&path, true, |staged| {
+            staged.write_all(b"{\"version\":").unwrap();
+            Err("interrupted write".into())
+        })
+        .is_err());
+        assert_eq!(fs::read(&path).unwrap(), saved);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert_eq!(load(&path).unwrap().title, scene.title);
+
+        save(&Scene::empty(), &path, true).unwrap();
+        assert!(load(&path).unwrap().objects.is_empty());
+    }
 }

@@ -96,9 +96,7 @@ impl Session {
         else {
             return Some(rpc_error(id, -32600, "Invalid request"));
         };
-        if message.get("id").is_none() {
-            return None;
-        }
+        message.get("id")?;
         let params = &message["params"];
         let result = match method {
             "initialize" => {
@@ -284,13 +282,15 @@ impl Session {
                 let mut visited = vec![play.current().to_owned()];
                 let mut errors = Vec::new();
                 let mut sounds = Vec::new();
+                let mut controls: controls::InputControls = optional(&args, "controls", Default::default())?;
                 for frame in 0..frames {
                     for action in actions.iter().filter(|action| action.frame == frame) {
                         play.ui_action(&action.button)?;
                     }
-                    if play.tick(input, dt) {
+                    if play.tick_input(input, &controls, dt) {
                         visited.push(play.current().to_owned());
                     }
+                    controls.clear_edges();
                     errors.extend(play.take_script_errors());
                     sounds.extend(play.take_sounds().into_iter().take(256_usize.saturating_sub(sounds.len())));
                     play.take_events();
@@ -719,8 +719,10 @@ fn simulation_input(args: &Value, default: u64) -> Result<(u64, f32, Vec2), Stri
 fn playback(scene: &Scene, args: &Value, default: u64) -> Result<(u64, Playback), String> {
     let (frames, dt, input) = simulation_input(args, default)?;
     let mut play = Playback::new(scene.clone())?;
+    let mut controls: controls::InputControls = optional(args, "controls", Default::default())?;
     for _ in 0..frames {
-        play.tick(input, dt);
+        play.tick_input(input, &controls, dt);
+        controls.clear_edges();
     }
     Ok((frames, play))
 }
@@ -899,6 +901,20 @@ fn tools() -> Vec<Value> {
     let vec3 = json!({"type":"array","minItems":3,"maxItems":3,"items":{"type":"number"}});
     let id = json!({"type":"integer","minimum":1});
     let key = json!({"enum":controls::KEY_NAMES});
+    let key_names: Vec<_> = controls::KEY_NAMES
+        .iter()
+        .map(|key| key.to_ascii_lowercase())
+        .collect();
+    let key_set = json!({"type":"array","uniqueItems":true,"items":{"enum":key_names}});
+    let buttons =
+        json!({"type":"array","uniqueItems":true,"items":{"enum":["left","middle","right"]}});
+    let pair = json!({"type":"array","minItems":2,"maxItems":2,"items":{"type":"number"}});
+    let controls = json!({"type":"object","additionalProperties":false,"properties":{
+        "keys":key_set,"pressed":key_set,"released":key_set,
+        "mouse":{"type":"object","additionalProperties":false,"properties":{
+            "position":pair,"wheel":pair,"down":buttons,"pressed":buttons,"released":buttons
+        }}
+    }});
     let bindings = json!({"type":"object","properties":{"forward":key,"backward":key,"left":key,"right":key,"arrows":boolean},"additionalProperties":false});
     let body = json!({"anyOf":[{"type":"null"},{"type":"object","properties":{
         "kind":{"enum":["static","dynamic","kinematic"]},"collider":{"enum":["box","sphere"]},
@@ -961,9 +977,9 @@ fn tools() -> Vec<Value> {
         tool("prefab_create","Store an object subtree as a reusable project prefab.",json!({"prefab":string,"root":id}),&["prefab","root"]),
         tool("prefab_instantiate","Copy a prefab into the active scene and assign fresh object IDs.",json!({"prefab":string,"parent":{"type":["integer","null"],"minimum":1}}),&["prefab"]),
         tool("project_use_asset","Add a shared asset by project ID and return its slot in the active scene.",json!({"kind":{"enum":["model","script"]},"asset_id":id}),&["kind","asset_id"]),
-        tool("project_simulate","Simulate scene transitions, button actions and in-memory progress.",json!({"frames":frame,"dt":dt,"input":axes,"actions":{"type":"array","maxItems":64,"items":{"type":"object","properties":{"frame":frame,"button":string},"required":["frame","button"],"additionalProperties":false}}}),&[]),
-        tool("scene_capture","Capture a PNG preview of the game camera, optionally after simulation.",json!({"path":path,"width":pixels,"height":pixels,"frames":frame,"dt":dt,"input":axes,"inline":boolean}),&["path"]),
-        tool("test_scene","Simulate the scene and check local object transforms or script errors.",json!({"frames":frame,"dt":dt,"input":axes,"expect_events":expect_events,"assertions":{"type":"array","maxItems":64,"items":{"type":"object","required":["id"],"properties":{"id":{"type":"integer","minimum":1},"position":vec3,"rotation":vec3,"scale":vec3,"visible":boolean,"tolerance":{"type":"number","minimum":0,"maximum":100}},"additionalProperties":false}}}),&[]),
+        tool("project_simulate","Simulate scene transitions, button actions and in-memory progress.",json!({"frames":frame,"dt":dt,"input":axes,"controls":controls,"actions":{"type":"array","maxItems":64,"items":{"type":"object","properties":{"frame":frame,"button":string},"required":["frame","button"],"additionalProperties":false}}}),&[]),
+        tool("scene_capture","Capture a PNG preview of the game camera, optionally after simulation.",json!({"path":path,"width":pixels,"height":pixels,"frames":frame,"dt":dt,"input":axes,"controls":controls,"inline":boolean}),&["path"]),
+        tool("test_scene","Simulate the scene and check local object transforms or script errors.",json!({"frames":frame,"dt":dt,"input":axes,"controls":controls,"expect_events":expect_events,"assertions":{"type":"array","maxItems":64,"items":{"type":"object","required":["id"],"properties":{"id":{"type":"integer","minimum":1},"position":vec3,"rotation":vec3,"scale":vec3,"visible":boolean,"tolerance":{"type":"number","minimum":0,"maximum":100}},"additionalProperties":false}}}),&[]),
         tool("build_game","Export a fresh game and start a build or toolchain check in the background.",json!({"path":path,"profile":{"enum":["check","test","debug","release","android-debug","android-release","android-bundle"]},"target":{"enum":["windows-x64","macos-arm64","linux-x64",null]}}),&["path","profile"]),
         tool("artifact_read","Read a build artifact in base64 chunks, including from remote MCP clients.",json!({"job":{"type":"integer","minimum":1},"index":index,"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":524288}}),&["job","index"]),
         tool("build_cancel","Request cancellation of a running build and its child processes.",json!({"job":{"type":"integer","minimum":1}}),&["job"]),
@@ -1041,7 +1057,7 @@ fn tools() -> Vec<Value> {
         tool(
             "simulate",
             "Run a bounded headless Play session and return object transforms and script errors.",
-            json!({"frames":frame,"dt":dt,"input":axes}),
+            json!({"frames":frame,"dt":dt,"input":axes,"controls":controls}),
             &[],
         ),
         tool(

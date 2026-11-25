@@ -361,7 +361,7 @@ fn run(
             report.exit_code = status.code();
             report
         }
-        Err(report) => report,
+        Err(report) => *report,
     };
     report.stdout = tail(&stdout);
     report.stderr = tail(&stderr);
@@ -435,14 +435,15 @@ fn run_command(
     stderr: &Path,
     cancelled: &AtomicBool,
     stages: &Sender<Stage>,
-) -> Result<ExitStatus, Report> {
-    let logs = |path: &Path| {
+) -> Result<ExitStatus, Box<Report>> {
+    let logs = |path: &Path| -> Result<File, Box<Report>> {
         File::create(path).map_err(|error| {
             failed(
                 Stage::Build,
                 "log_failed",
                 format!("Could not open {}: {error}", path.display()),
             )
+            .into()
         })
     };
     command.stdout(logs(stdout)?).stderr(logs(stderr)?);
@@ -482,17 +483,13 @@ fn run_command(
     };
     if let Err(error) = child.kill() {
         if error.kind() != io::ErrorKind::NotFound && !matches!(child.try_wait(), Ok(Some(_))) {
-            return Err(failed(
-                Stage::Build,
-                "termination_failed",
-                error.to_string(),
-            ));
+            return Err(failed(Stage::Build, "termination_failed", error.to_string()).into());
         }
     }
     child
         .wait()
         .map_err(|error| failed(Stage::Build, "termination_failed", error.to_string()))?;
-    Err(report)
+    Err(Box::new(report))
 }
 
 fn cancelled_report(stage: Stage) -> Report {
@@ -704,7 +701,7 @@ mod tests {
             }
             cancelled.store(true, Ordering::Relaxed);
             assert!(root.join("started").exists());
-            let report = worker.join().unwrap().err().expect("expected cancellation");
+            let report = worker.join().unwrap().expect_err("expected cancellation");
             assert_eq!(report.state, "cancelled");
             assert_eq!(report.code, Some("cancelled"));
             thread::sleep(Duration::from_secs(1));

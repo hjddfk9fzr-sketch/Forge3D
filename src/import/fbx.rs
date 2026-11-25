@@ -81,7 +81,7 @@ pub(super) fn parts(path: &Path, root: Option<&Path>) -> Result<Vec<Part>, Strin
             });
             let uvs = named_uv.map_or(&mesh.vertex_uv, |set| &set.vertex_uv);
             let batch = batches.entry(slot).or_default();
-            for triangle in corners[..written].chunks_exact(3) {
+            for triangle in corners[..written].as_chunks::<3>().0 {
                 let order = if mirrored { [0, 2, 1] } else { [0, 1, 2] };
                 for offset in order {
                     let i = triangle[offset] as usize;

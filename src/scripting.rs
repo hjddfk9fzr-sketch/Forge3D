@@ -1,5 +1,6 @@
 use crate::{
     animation::Player,
+    controls::InputControls,
     physics::Event,
     runtime::{Object, Scene, Shape, View},
 };
@@ -179,7 +180,7 @@ impl Scripts {
     pub(crate) fn step(
         &mut self,
         scene: &mut Scene,
-        input: Vec2,
+        input: &Map,
         dt: f32,
         errors: &mut Vec<String>,
     ) {
@@ -235,7 +236,7 @@ impl Scripts {
     pub(crate) fn camera(
         &mut self,
         scene: &mut Scene,
-        input: Vec2,
+        input: &Map,
         dt: f32,
         errors: &mut Vec<String>,
     ) {
@@ -291,7 +292,7 @@ impl Scripts {
 #[derive(Clone, Copy)]
 enum Hook<'a> {
     Start,
-    Update(Vec2, f32),
+    Update(&'a Map, f32),
     Event(&'a Map),
     Ui(&'a Map),
 }
@@ -305,10 +306,39 @@ fn append_effects(pending: &mut Vec<Effect>, effects: Vec<Effect>) {
     );
 }
 
-fn input_map(input: Vec2) -> Map {
+pub(crate) fn input_map(movement: Vec2, controls: &InputControls) -> Map {
+    use crate::controls::{Button, Key};
+    let keys = |values: &std::collections::BTreeSet<Key>| {
+        values
+            .iter()
+            .map(|key| key.name().to_lowercase().into())
+            .collect::<rhai::Array>()
+    };
+    let buttons = |values: &std::collections::BTreeSet<Button>| {
+        values
+            .iter()
+            .map(|button| button.name().into())
+            .collect::<rhai::Array>()
+    };
+    let mut mouse = Map::new();
+    for (name, value) in [
+        ("x", controls.mouse.position[0]),
+        ("y", controls.mouse.position[1]),
+        ("wheel_x", controls.mouse.wheel[0]),
+        ("wheel_y", controls.mouse.wheel[1]),
+    ] {
+        mouse.insert(name.into(), f64::from(value).into());
+    }
+    mouse.insert("down".into(), buttons(&controls.mouse.down).into());
+    mouse.insert("pressed".into(), buttons(&controls.mouse.pressed).into());
+    mouse.insert("released".into(), buttons(&controls.mouse.released).into());
     let mut map = Map::new();
-    map.insert("x".into(), f64::from(input.x).into());
-    map.insert("z".into(), f64::from(input.y).into());
+    map.insert("x".into(), f64::from(movement.x).into());
+    map.insert("z".into(), f64::from(movement.y).into());
+    map.insert("keys".into(), keys(&controls.keys).into());
+    map.insert("pressed".into(), keys(&controls.pressed).into());
+    map.insert("released".into(), keys(&controls.released).into());
+    map.insert("mouse".into(), mouse.into());
     map
 }
 
@@ -343,7 +373,7 @@ impl Instance {
         engine: &Engine,
         object: &Object,
         camera: &View,
-        input: Vec2,
+        input: &Map,
         dt: f32,
     ) -> Result<View, String> {
         let mut view = Map::new();
@@ -360,12 +390,7 @@ impl Instance {
                 &mut Scope::new(),
                 &self.ast,
                 "camera",
-                (
-                    view,
-                    self.object_map(object),
-                    f64::from(dt),
-                    input_map(input),
-                ),
+                (view, self.object_map(object), f64::from(dt), input.clone()),
             )
             .map_err(|error| error.to_string())?;
         let [yaw, pitch, distance] = vector(&result, ["yaw", "pitch", "distance"])?;
@@ -398,7 +423,7 @@ impl Instance {
                 &mut scope,
                 &self.ast,
                 "update",
-                (data, f64::from(dt), input_map(input)),
+                (data, f64::from(dt), input.clone()),
             ),
             Hook::Event(event) => engine.call_fn_with_options(
                 options,
