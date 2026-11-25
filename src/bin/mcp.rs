@@ -927,7 +927,7 @@ fn tools() -> Vec<Value> {
     let number = json!({"type":"number"});
     let vec4 = json!({"type":"array","minItems":4,"maxItems":4,"items":number});
     let surface = json!({"anyOf":[{"type":"null"},{"type":"object","properties":{
-        "base_color":vec4,"metallic":number,"roughness":number,"emissive":vec3,"unlit":boolean,
+        "base_color":vec4,"metallic":number,"roughness":number,"emissive":vec3,"unlit":boolean,"use_color_shader":boolean,
         "alpha":{"enum":["opaque","mask","blend"]},"alpha_cutoff":number
     },"additionalProperties":false}]});
     let point = json!({"anyOf":[{"type":"null"},{"type":"object","properties":{
@@ -943,7 +943,7 @@ fn tools() -> Vec<Value> {
         "orientation":{"enum":["landscape","portrait","sensor"]}
     },"additionalProperties":false});
     let light_settings = json!({"type":"object","properties":{"direction":vec3,"color":vec3,
-        "intensity":number,"ambient":number,"shadows":boolean,"shadow_extent":number},"additionalProperties":false});
+        "intensity":number,"ambient":number,"shadows":boolean,"shadow_extent":number,"color_shader":{"type":"string","maxLength":16384}},"additionalProperties":false});
     let patch = json!({
         "name":string,
         "shape":{"anyOf":[{"enum":["Empty","Cube","Sphere","Plane"]},{"type":"object","properties":{"Model":index},"required":["Model"],"additionalProperties":false}]},

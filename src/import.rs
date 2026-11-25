@@ -365,6 +365,7 @@ fn gltf_node(
                 metallic: pbr.metallic_factor(),
                 roughness: pbr.roughness_factor(),
                 emissive: material.emissive_factor(),
+                use_color_shader: false,
                 unlit: material.unlit(),
                 alpha_cutoff: material.alpha_cutoff().unwrap_or(0.5),
                 alpha: match material.alpha_mode() {

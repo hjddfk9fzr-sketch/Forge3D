@@ -16,7 +16,7 @@ use forge3d::{
     runtime::{Object, PreparedScene, Scene, ScriptAsset, Shape, View},
     scripting,
     settings::{Application, Orientation},
-    workspace::{OpenProject, Project, EXTENSION},
+    workspace::{ModelOwner, OpenProject, Project, SharedAsset, EXTENSION},
 };
 use macroquad::prelude::*;
 use std::{
@@ -124,6 +124,8 @@ enum Action {
     ProjectSave,
     ProjectAdd,
     PrefabCreate,
+    AssetUsage,
+    ColorShader,
 }
 
 impl Action {
@@ -148,12 +150,18 @@ impl Action {
             Self::Script => "Script Editor",
             Self::ProjectSave => "Save project",
             Self::ProjectAdd => "Add scene to project",
+            Self::ColorShader => "Scene color shader",
+            Self::AssetUsage => "Where used",
             Self::PrefabCreate => "Create prefab",
         }
     }
 
     fn hint(self) -> &'static str {
         match self {
+            Self::ColorShader => {
+                "GLSL function body · vec3 forge_color(vec3 rgb, vec2 uv, float time)"
+            }
+            Self::AssetUsage => "Select a model or shared script to see the objects that use it.",
             Self::New => "Create an empty scene",
             Self::PhysicsDemo => "Load the Physics Workshop scene",
             Self::RenderingDemo => "Load the Light & Motion Workshop scene",
@@ -177,12 +185,31 @@ impl Action {
     }
 }
 
+fn asset_usage_rows(project: &Project, asset: SharedAsset) -> Vec<String> {
+    project
+        .asset_usages(asset)
+        .into_iter()
+        .map(|usage| {
+            let (kind, owner) = match usage.owner {
+                ModelOwner::Scene(name) => ("Scene", name),
+                ModelOwner::Prefab(name) => ("Prefab", name),
+            };
+            format!(
+                "{kind} {owner} · {} #{}",
+                usage.object_name, usage.object_id
+            )
+        })
+        .collect()
+}
+
 struct Dialog {
     action: Action,
     path: String,
     scene_id: String,
+    shader_source: String,
     presentation: Option<UiDesigner>,
     script: Option<ScriptEditor>,
+    usage: Option<(Project, SharedAsset, Vec<String>)>,
     error: Option<String>,
     profile: jobs::Profile,
     target: Option<jobs::Target>,
@@ -1227,6 +1254,46 @@ impl Editor {
             if ui.small_button("Import model…").clicked() {
                 self.prompt(Action::Import);
             }
+            let has_assets = !self.scene.models.is_empty()
+                || !self.scene.scripts.is_empty()
+                || self.project.as_ref().is_some_and(|open| {
+                    !open.project.models().is_empty() || !open.project.scripts().is_empty()
+                });
+            if ui
+                .add_enabled(has_assets, egui::Button::new("Where used…"))
+                .clicked()
+            {
+                self.prompt(Action::AssetUsage);
+                let snapshot = match &self.project {
+                    Some(open) => open.snapshot(&self.scene),
+                    None => Project::new("scene", &self.scene),
+                };
+                if let Some(dialog) = &mut self.dialog {
+                    match snapshot {
+                        Ok(project) => {
+                            if let Some(id) = project
+                                .models()
+                                .keys()
+                                .next()
+                                .copied()
+                                .map(SharedAsset::Model)
+                                .or_else(|| {
+                                    project
+                                        .scripts()
+                                        .keys()
+                                        .next()
+                                        .copied()
+                                        .map(SharedAsset::Script)
+                                })
+                            {
+                                let rows = asset_usage_rows(&project, id);
+                                dialog.usage = Some((project, id, rows));
+                            }
+                        }
+                        Err(error) => dialog.error = Some(error),
+                    }
+                }
+            }
             ui.add(egui::TextEdit::singleline(&mut self.asset_filter).hint_text("Find assets"));
             let filter = self.asset_filter.to_lowercase();
             if ui.small_button("Import .rhai…").clicked() {
@@ -1323,6 +1390,9 @@ impl Editor {
                             number(ui, "Shadow coverage", &mut light.shadow_extent, 1. ..=200.);
                         });
                     ui.separator();
+                    if ui.button("Edit scene color shader…").clicked() {
+                        self.prompt(Action::ColorShader);
+                    }
                     section(ui, "Camera script");
                     let mut controller = self.scene.camera_controller;
                     let display = controller
@@ -2087,6 +2157,8 @@ impl Editor {
             | Action::ProjectDemo
             | Action::CampaignDemo
             | Action::Presentation
+            | Action::ColorShader
+            | Action::AssetUsage
             | Action::Script
             | Action::ProjectAdd => Path::new(""),
             Action::Open | Action::Save => self
@@ -2109,9 +2181,15 @@ impl Editor {
             action,
             path: path.display().to_string(),
             scene_id: String::new(),
+            shader_source: if matches!(action, Action::ColorShader) {
+                self.scene.lighting.color_shader.clone()
+            } else {
+                String::new()
+            },
             presentation: matches!(action, Action::Presentation)
                 .then(|| UiDesigner::new(self.scene.presentation.clone())),
             script: None,
+            usage: None,
             error: None,
             profile: jobs::Profile::Debug,
             target: None,
@@ -2132,7 +2210,10 @@ impl Editor {
         };
         let mut submit = false;
         let mut open = true;
-        let editing = matches!(dialog.action, Action::Presentation | Action::Script);
+        let editing = matches!(
+            dialog.action,
+            Action::Presentation | Action::Script | Action::ColorShader
+        );
         let window = egui::Window::new(dialog.action.label())
             .default_width(if editing {
                 ctx.screen_rect().width().min(840.) - 32.
@@ -2154,9 +2235,53 @@ impl Editor {
                         | Action::ProjectDemo
                         | Action::CampaignDemo
                         | Action::Presentation
+                        | Action::ColorShader
+                        | Action::AssetUsage
                         | Action::Script
                 ) {
                     ui.add(egui::TextEdit::singleline(&mut dialog.path).desired_width(420.));
+                }
+                if matches!(dialog.action, Action::ColorShader) {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut dialog.shader_source)
+                            .code_editor()
+                            .desired_width(ui.available_width())
+                            .desired_rows(8),
+                    );
+                    if ui.button("Pulse example").clicked() {
+                        dialog.shader_source = lighting::PULSE_SHADER.into();
+                    }
+                    ui.label("Enable Use scene color shader on the object's material. An empty shader uses the standard color.");
+                }
+                if let Some((project, selected, rows)) = &mut dialog.usage {
+                    let before = *selected;
+                    egui::ComboBox::from_id_salt("model-usage")
+                        .selected_text(match *selected {
+                            SharedAsset::Model(id) => format!("Model · {} #{id}", project.models()[&id].name),
+                            SharedAsset::Script(id) => format!("Script · {} #{id}", project.scripts()[&id].name),
+                        })
+                        .show_ui(ui, |ui| {
+                            for (id, model) in project.models() {
+                                ui.selectable_value(selected, SharedAsset::Model(*id), format!("Model · {} #{id}", model.name));
+                            }
+                            for (id, script) in project.scripts() {
+                                ui.selectable_value(selected, SharedAsset::Script(*id), format!("Script · {} #{id}", script.name));
+                            }
+                        });
+                    if *selected != before {
+                        *rows = asset_usage_rows(project, *selected);
+                    }
+                    if rows.is_empty() {
+                        ui.label("Not used in this project.");
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .max_height(300.)
+                            .show(ui, |ui| {
+                                for row in rows.iter() {
+                                    ui.label(row);
+                                }
+                            });
+                    }
                 }
                 if let Some(editor) = &mut dialog.presentation {
                     let aspect = if self.scene.application.orientation == Orientation::Portrait {
@@ -2235,9 +2360,11 @@ impl Editor {
                 submit = ui
                     .button(if discarding {
                         "Discard changes and continue"
+                    } else if matches!(dialog.action, Action::AssetUsage) {
+                        "Close"
                     } else if matches!(
                         dialog.action,
-                        Action::Application | Action::Presentation | Action::Script
+                        Action::Application | Action::Presentation | Action::Script | Action::ColorShader
                     ) {
                         "Apply"
                     } else {
@@ -2272,6 +2399,8 @@ impl Editor {
                 | Action::ProjectDemo
                 | Action::CampaignDemo
                 | Action::Presentation
+                | Action::ColorShader
+                | Action::AssetUsage
                 | Action::Script
                 | Action::ProjectAdd
         ) && path.as_os_str().is_empty()
@@ -2279,6 +2408,15 @@ impl Editor {
             return Err("Enter a path.".into());
         }
         match action {
+            Action::ColorShader => {
+                self.prepared.apply_color_shader(&dialog.shader_source)?;
+                self.scene
+                    .lighting
+                    .color_shader
+                    .clone_from(&dialog.shader_source);
+                Ok("Scene color shader applied".into())
+            }
+            Action::AssetUsage => Ok("Asset usage closed".into()),
             Action::New => {
                 self.new_scene();
                 Ok("New scene".into())
@@ -2587,6 +2725,7 @@ fn rendering_inspector(ui: &mut egui::Ui, object: &mut Object, rig: Option<&anim
                 vector(ui, "Emissive", &mut surface.emissive, 0.025);
                 surface.emissive = surface.emissive.map(|value| value.clamp(0., 50.));
                 ui.checkbox(&mut surface.unlit, "Unlit");
+                ui.checkbox(&mut surface.use_color_shader, "Use scene color shader");
             }
             let mut point = object.light.is_some();
             if ui.checkbox(&mut point, "Point light").changed() {

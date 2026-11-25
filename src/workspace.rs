@@ -11,6 +11,25 @@ pub const EXTENSION: &str = ".forge-project.json";
 pub const PROJECT_SCHEMA_VERSION: u32 = 1;
 pub type AssetId = u64;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharedAsset {
+    Model(AssetId),
+    Script(AssetId),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ModelOwner<'a> {
+    Scene(&'a str),
+    Prefab(&'a str),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ModelUsage<'a> {
+    pub owner: ModelOwner<'a>,
+    pub object_id: u64,
+    pub object_name: &'a str,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct StoredScene {
     scene: Scene,
@@ -48,7 +67,7 @@ impl Project {
         first.application.title = "Forge3D · Two Workshops".into();
         first.application.identifier = "com.forge3d.betademo".into();
         first.application.version = env!("CARGO_PKG_VERSION").into();
-        first.application.version_code = 108;
+        first.application.version_code = 110;
         first.objects[0].script = Some(
             r#"fn update(object, dt, input) {
                 if input.x > 0.5 { object.next_scene = "workshop"; }
@@ -250,6 +269,43 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
 
     pub fn models(&self) -> &BTreeMap<AssetId, Model> {
         &self.models
+    }
+
+    pub fn model_usages(&self, id: AssetId) -> Vec<ModelUsage<'_>> {
+        self.asset_usages(SharedAsset::Model(id))
+    }
+
+    pub fn asset_usages(&self, asset: SharedAsset) -> Vec<ModelUsage<'_>> {
+        let mut usages = Vec::new();
+        for (entries, prefab) in [(&self.scenes, false), (&self.prefabs, true)] {
+            for (name, stored) in entries {
+                for object in &stored.scene.objects {
+                    let matches = match asset {
+                        SharedAsset::Model(id) => {
+                            matches!(object.shape, Shape::Model(slot) if stored.models.get(slot) == Some(&id))
+                        }
+                        SharedAsset::Script(id) => {
+                            object
+                                .script_asset
+                                .and_then(|slot| stored.scripts.get(slot))
+                                == Some(&id)
+                        }
+                    };
+                    if matches {
+                        usages.push(ModelUsage {
+                            owner: if prefab {
+                                ModelOwner::Prefab(name)
+                            } else {
+                                ModelOwner::Scene(name)
+                            },
+                            object_id: object.id,
+                            object_name: &object.name,
+                        });
+                    }
+                }
+            }
+        }
+        usages
     }
 
     pub fn scripts(&self) -> &BTreeMap<AssetId, ScriptAsset> {

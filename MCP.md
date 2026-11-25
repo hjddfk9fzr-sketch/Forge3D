@@ -110,6 +110,7 @@ codex mcp add forge3d --url http://127.0.0.1:7333/mcp
 
 - `scene_new {"rendering_demo":true}` открывает Light & Motion Workshop. `scene_snapshot` возвращает список клипов каждой модели и их длительность.
 - `scene_settings` принимает частичное обновление `lighting`, например `{"shadows":false,"intensity":3.0}`.
+- Для пользовательского цвета передайте тело GLSL через `scene_settings.lighting.color_shader` и включите `use_color_shader` в материале через `object_update.surface`. Компиляция происходит при графическом запуске.
 - `object_update` принимает `light` для точечного источника, `surface` для переопределения материала и `cast_shadows` для переключения тени. Для настройки клипа передайте `animation`, например `{"clip":"Reach","time":0.6,"playing":false}`. Значение `animation: null` возвращает исходную позу.
 - `simulate` возвращает текущие параметры воспроизведения. `scene_capture` вычисляет позу после указанного числа кадров и сохраняет PNG с упрощённым программным освещением.
 

@@ -7,6 +7,31 @@ use serde_json::{json, Value};
 use std::{fs, process::Command};
 
 #[test]
+fn color_shader_survives_scene_load_and_game_export() {
+    use forge3d::lighting::{Surface, PULSE_SHADER};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shader.forge.json");
+    let mut scene = Scene::demo();
+    scene.lighting.color_shader = PULSE_SHADER.into();
+    scene.objects[0].surface = Some(Surface {
+        use_color_shader: true,
+        ..Surface::default()
+    });
+    project::save(&scene, &path, false).unwrap();
+    let loaded = project::load(&path).unwrap();
+    let game = dir.path().join("game");
+    export::game(&loaded, &game).unwrap();
+    assert_eq!(
+        project::load(&game.join("assets/scene.json")).unwrap(),
+        scene
+    );
+    for invalid in ["a".repeat(16385), String::from("a\0b")] {
+        scene.lighting.color_shader = invalid;
+        assert!(scene.validate_objects().is_err());
+    }
+}
+
+#[test]
 fn alpha_scene_migration_keeps_ids_and_animation_without_rewriting_source() {
     let temp = tempfile::tempdir().unwrap();
     let first = temp.path().join("alpha.forge.json");

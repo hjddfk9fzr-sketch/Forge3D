@@ -8,6 +8,71 @@ use macroquad::prelude::Vec2;
 use std::{fs, path::Path, process::Command};
 
 #[test]
+fn model_usage_tracks_objects_by_asset_id_across_scenes_prefabs_and_reload() {
+    use forge3d::workspace::{ModelOwner, ModelUsage, OpenProject};
+
+    let mut scene = Scene::empty();
+    let model = Scene::rendering_demo().models.remove(0);
+    let mut other = model.clone();
+    std::sync::Arc::make_mut(&mut other.parts)[0].vertices[0].position[0] += 1.;
+    scene.models = vec![model.clone(), other.clone()];
+    let door = scene
+        .add_object(Object::new("Door", Shape::Model(0)))
+        .unwrap();
+    let mut project = Project::new("first", &scene).unwrap();
+    project.create_prefab("door", &scene, door).unwrap();
+    let mut second = Scene::empty();
+    second.models = vec![other, model.clone()];
+    let exit = second
+        .add_object(Object::new("Exit", Shape::Model(1)))
+        .unwrap();
+    project.add_scene("second", &second).unwrap();
+    let id = *project
+        .models()
+        .iter()
+        .find(|(_, m)| **m == model)
+        .unwrap()
+        .0;
+    let unused = *project.models().keys().find(|k| **k != id).unwrap();
+    let check = |project: &Project| {
+        assert_eq!(
+            project.model_usages(id),
+            vec![
+                ModelUsage {
+                    owner: ModelOwner::Scene("first"),
+                    object_id: door,
+                    object_name: "Door"
+                },
+                ModelUsage {
+                    owner: ModelOwner::Scene("second"),
+                    object_id: exit,
+                    object_name: "Exit"
+                },
+                ModelUsage {
+                    owner: ModelOwner::Prefab("door"),
+                    object_id: door,
+                    object_name: "Door"
+                },
+            ]
+        );
+        assert!(project.model_usages(unused).is_empty());
+    };
+    check(&project);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.forge-project.json");
+    project.save(&path, false).unwrap();
+    let reopened = Project::load(&path).unwrap();
+    check(&reopened);
+
+    let open = OpenProject::open(reopened);
+    scene.objects[0].shape = Shape::Model(1);
+    let snapshot = open.snapshot(&scene).unwrap();
+    assert_eq!(snapshot.model_usages(id).len(), 2);
+    assert_eq!(snapshot.model_usages(unused)[0].object_name, "Door");
+    check(&open.project);
+}
+
+#[test]
 fn portable_project_reuses_prefab_assets_and_remaps_object_ids() {
     let temp = tempfile::tempdir().unwrap();
     let old = temp.path().join("old");
@@ -54,6 +119,9 @@ fn portable_project_reuses_prefab_assets_and_remaps_object_ids() {
         .unwrap();
     fs::rename(old, &renamed).unwrap();
     let saved = Project::load(&renamed.join("demo.forge-project.json")).unwrap();
+    let usages = saved.asset_usages(forge3d::workspace::SharedAsset::Script(script_id));
+    assert_eq!(usages.len(), 4);
+    assert!(usages.iter().all(|entry| entry.object_name == "Child"));
     assert_eq!(saved.start(), "second");
     assert_eq!(saved.scene("first").unwrap(), first);
     assert_eq!(saved.scene("second").unwrap(), second);

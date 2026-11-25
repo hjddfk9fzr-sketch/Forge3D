@@ -12,6 +12,8 @@ pub struct Lighting {
     pub color: [f32; 3],
     pub intensity: f32,
     pub ambient: f32,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub color_shader: String,
     pub shadows: bool,
     pub shadow_extent: f32,
 }
@@ -23,6 +25,7 @@ impl Default for Lighting {
             color: [1., 0.96, 0.86],
             intensity: 2.6,
             ambient: 0.35,
+            color_shader: String::new(),
             shadows: true,
             shadow_extent: 14.,
         }
@@ -86,6 +89,8 @@ pub struct Surface {
     pub metallic: f32,
     pub roughness: f32,
     pub emissive: [f32; 3],
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub use_color_shader: bool,
     pub unlit: bool,
     pub alpha: Alpha,
     pub alpha_cutoff: f32,
@@ -98,6 +103,7 @@ impl Default for Surface {
             metallic: 0.,
             roughness: 0.7,
             emissive: [0.; 3],
+            use_color_shader: false,
             unlit: false,
             alpha: Alpha::Opaque,
             alpha_cutoff: 0.5,
@@ -127,7 +133,18 @@ fn valid_color(color: &[f32]) -> bool {
     color.iter().all(|value| (0. ..=1.).contains(value))
 }
 
+pub const PULSE_SHADER: &str = "return rgb * (0.65 + 0.35 * sin(time * 3.0 + uv.y * 6.28));";
+
+pub fn validate_color_shader(source: &str) -> Result<(), String> {
+    if source.len() > 16 * 1024 || source.contains('\0') {
+        return Err("Color shaders support up to 16 KiB of GLSL without NUL bytes.".into());
+    }
+    Ok(())
+}
+
 pub(crate) struct Renderer {
+    standard: Material,
+    shader_source: String,
     pub main: Material,
     pub depth: Material,
     shadow: RenderTarget,
@@ -135,7 +152,14 @@ pub(crate) struct Renderer {
 }
 
 impl Renderer {
-    pub fn new() -> Result<Self, String> {
+    fn color_material(source: &str) -> Result<Material, String> {
+        validate_color_shader(source)?;
+        let body = if source.trim().is_empty() {
+            "return rgb;"
+        } else {
+            source
+        };
+        let fragment = FRAGMENT.replace("/* COLOR_SHADER */", body);
         let uniforms = [
             ("SunDirection", UniformType::Float3),
             ("SunColor", UniformType::Float3),
@@ -144,6 +168,7 @@ impl Renderer {
             ("SunMatrix", UniformType::Mat4),
             ("NormalMatrix", UniformType::Mat4),
             ("UseShadow", UniformType::Float1),
+            ("UseColorShader", UniformType::Float1),
             ("Tint", UniformType::Float4),
             ("Emission", UniformType::Float3),
             ("Params", UniformType::Float4),
@@ -164,10 +189,10 @@ impl Renderer {
             depth_write: true,
             ..Default::default()
         };
-        let main = load_material(
+        load_material(
             ShaderSource::Glsl {
                 vertex: VERTEX,
-                fragment: FRAGMENT,
+                fragment: &fragment,
             },
             MaterialParams {
                 uniforms,
@@ -182,7 +207,16 @@ impl Renderer {
                 },
             },
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn new() -> Result<Self, String> {
+        let main = Self::color_material("")?;
+        let pipeline = PipelineParams {
+            depth_test: Comparison::LessOrEqual,
+            depth_write: true,
+            ..Default::default()
+        };
         let depth = load_material(
             ShaderSource::Glsl {
                 vertex: DEPTH_VERTEX,
@@ -210,11 +244,35 @@ impl Renderer {
         let white = Texture2D::from_rgba8(1, 1, &[255; 4]);
         main.set_texture("ShadowMap", shadow.texture.clone());
         Ok(Self {
+            standard: main.clone(),
+            shader_source: String::new(),
             main,
             depth,
             shadow,
             white,
         })
+    }
+
+    pub fn apply_shader(&mut self, source: &str) -> Result<(), String> {
+        let material = if source.trim().is_empty() {
+            self.standard.clone()
+        } else {
+            Self::color_material(source)?
+        };
+        material.set_texture("ShadowMap", self.shadow.texture.clone());
+        self.main = material;
+        self.shader_source = source.to_owned();
+        Ok(())
+    }
+
+    pub fn sync_shader(&mut self, source: &str) {
+        if self.shader_source != source {
+            if let Err(error) = self.apply_shader(source) {
+                macroquad::logging::error!("Color shader: {}", error);
+                self.main = self.standard.clone();
+                self.shader_source = source.to_owned();
+            }
+        }
     }
 
     pub fn shadow_camera(&self, target: Vec3, settings: &Lighting) -> Camera3D {
@@ -286,13 +344,15 @@ impl Renderer {
             .set_uniform("Tint", Vec4::from_array(surface.base_color));
         self.main
             .set_uniform("Emission", Vec3::from_array(surface.emissive));
+        self.main
+            .set_uniform("UseColorShader", f32::from(surface.use_color_shader));
         self.main.set_uniform(
             "Params",
             vec4(
                 surface.metallic,
                 surface.roughness,
                 surface.cutoff(),
-                if surface.unlit { 1. } else { 0. },
+                f32::from(surface.unlit),
             ),
         );
     }
@@ -338,9 +398,17 @@ varying mediump vec3 v_normal, v_pos;
 uniform sampler2D Texture, ShadowMap, MetalMap, EmissionMap;
 uniform vec3 SunDirection, SunColor, Eye, Emission;
 uniform vec4 Tint, Params;
-uniform float Ambient, UseShadow;
+uniform float Ambient, UseShadow, UseColorShader;
 uniform vec4 PointPosition0, PointPosition1, PointPosition2, PointPosition3;
 uniform vec3 PointColor0, PointColor1, PointColor2, PointColor3;
+uniform vec4 _Time;
+vec3 forge_color(vec3 rgb, vec2 uv, float time) {
+    /* COLOR_SHADER */
+}
+vec3 finish_color(vec3 rgb) {
+    if (UseColorShader < 0.5) return rgb;
+    return clamp(forge_color(rgb, v_uv, _Time.x), 0.0, 1.0);
+}
 const float PI = 3.14159265;
 
 float shadow_sample(vec2 uv, float depth) {
@@ -391,7 +459,7 @@ void main() {
     vec3 base = pow(tex.rgb,vec3(2.2)) * paint.rgb;
     vec3 emitted = pow(texture2D(EmissionMap,v_uv).rgb,vec3(2.2))*Emission;
     if (Params.w > 0.5) {
-        gl_FragColor = vec4(pow(clamp(base+emitted,0.0,1.0),vec3(1.0/2.2)),alpha);
+        gl_FragColor = vec4(finish_color(pow(clamp(base+emitted,0.0,1.0),vec3(1.0/2.2))),alpha);
         return;
     }
     vec3 n = normalize(v_normal);
@@ -405,7 +473,7 @@ void main() {
     light += point_light(PointPosition1,PointColor1,base,metal,rough,n,v);
     light += point_light(PointPosition2,PointColor2,base,metal,rough,n,v);
     light += point_light(PointPosition3,PointColor3,base,metal,rough,n,v);
-    gl_FragColor = vec4(pow(light/(vec3(1.0)+light),vec3(1.0/2.2)),alpha);
+    gl_FragColor = vec4(finish_color(pow(light/(vec3(1.0)+light),vec3(1.0/2.2))),alpha);
 }
 "#;
 

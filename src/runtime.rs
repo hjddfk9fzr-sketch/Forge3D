@@ -700,6 +700,7 @@ fn on_event(object, event) {
             return Err("Camera settings must use finite numbers.".into());
         }
         self.bindings.validate()?;
+        lighting::validate_color_shader(&self.lighting.color_shader)?;
         if !self.lighting.validate() {
             return Err("Invalid lighting settings.".into());
         }
@@ -872,6 +873,13 @@ impl PreparedScene {
         }
     }
 
+    pub fn apply_color_shader(&mut self, source: &str) -> Result<(), String> {
+        self.renderer
+            .as_mut()
+            .ok_or("GPU renderer unavailable.")?
+            .apply_shader(source)
+    }
+
     pub fn draw(&mut self, scene: &Scene, camera: &Camera3D, grid: bool, selected: Option<usize>) {
         let world = scene.world_transforms();
         let poses: Vec<_> = scene
@@ -891,7 +899,10 @@ impl PreparedScene {
                     .map(|rig| rig.pose(object.animation.as_ref()))
             })
             .collect();
-        let renderer = self.renderer.take();
+        let mut renderer = self.renderer.take();
+        if let Some(gpu) = &mut renderer {
+            gpu.sync_shader(&scene.lighting.color_shader);
+        }
         if let Some(gpu) = &renderer {
             let shadow = gpu.shadow_camera(camera.target, &scene.lighting);
             if scene.lighting.shadows {
