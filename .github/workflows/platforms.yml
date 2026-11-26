@@ -62,6 +62,7 @@ jobs:
           mkdir -p "$package"
           "$binaries/forge3d-batch$suffix" package-editor "${{ matrix.target }}" "$binaries/forge3d$suffix" "$package/${{ matrix.editor }}"
           cp "$binaries/forge3d-batch$suffix" "$binaries/forge3d-mcp$suffix" "$package/"
+          cp -R docs "$package/"
           cp README.md COMPATIBILITY.md MCP.md ROADMAP.md RELEASE-CHECKS.md "$package/"
           cp tests/fixtures/model-ascii.fbx "$package/example.fbx"
           "$binaries/forge3d-batch$suffix" campaign-demo "$package/workshop-run.forge-project.json"

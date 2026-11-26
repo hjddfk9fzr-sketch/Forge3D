@@ -1,4 +1,4 @@
-# Совместимость Forge3D 1.1
+# Форматы и совместимость Forge3D
 
 В 1.4.2 схемы полей описаны в Rust. Формат карты `components` сохраняется, включая числовой радиус жетона и строковое имя префаба. При открытии проекта неизвестные компоненты остаются в карте.
 
@@ -33,7 +33,7 @@ forge3d-batch export game.forge-project.json game-source
 
 ## Скрипты и автоматизация
 
-Rhai поддерживает `start(object)`, обязательный `update(object, dt, input)`, `on_event(object, event)`, `on_ui(object, event)` и `camera(view, object, dt, input)`. Сохраняются поля трансформации, `state`, управление анимацией и запросы `next_scene`, `save_scene`, `resume_game`, `play_sound`, `volume_step`. [Руководство Forge3D](README.md)
+Rhai поддерживает `start(object)`, обязательный `update(object, dt, input)`, `on_event(object, event)`, `on_ui(object, event)` и `camera(view, object, dt, input)`. Сохраняются поля трансформации, `state`, управление анимацией и запросы `next_scene`, `save_scene`, `resume_game`, `play_sound`, `volume_step`. [Скрипты Rhai](docs/gameplay.md#скрипты-rhai)
 
 Для MCP обычный маршрут проходит через `engine_info`, `project_open`, `project_validate`, `project_simulate`, `build_game`, `build_status` и `artifact_read`. Вызывайте `tools/list`, чтобы получить схемы доступных инструментов. [Руководство MCP](MCP.md)
 
