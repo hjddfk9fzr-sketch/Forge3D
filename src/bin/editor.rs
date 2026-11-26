@@ -175,7 +175,7 @@ impl Action {
             Self::BatchImport => "Choose files below or enter one path per line. Relative paths use the displayed directory.",
             Self::Dependencies => "Shared assets embedded in the selected scene or prefab.",
             Self::Reimport(SharedAsset::Script(_)) => "Replacement .rhai file",
-            Self::Reimport(SharedAsset::Model(_)) => "Replacement model file (.obj, .fbx, .gltf or .glb)",
+            Self::Reimport(SharedAsset::Model(_)) => "Replacement model file",
             Self::AssetUsage => "Select a model or shared script to see the objects that use it.",
             Self::New => "Create an empty scene",
             Self::PhysicsDemo => "Load the Physics Workshop scene",
@@ -190,7 +190,7 @@ impl Action {
             Self::Script => "Rhai source",
             Self::ProjectAdd => "Optional path to an existing .forge.json scene",
             Self::PrefabCreate => "Prefab ID (lowercase letters, digits or hyphens)",
-            Self::Import => "Model file (.obj, .fbx, .gltf or .glb)",
+            Self::Import => "Model file",
             Self::ImportScript => "Script file (.rhai)",
             Self::Export | Self::Build | Self::RetryBuild => {
                 "Path to a new folder for the Cargo project"
@@ -1490,7 +1490,13 @@ impl Editor {
                         self.open_script(ScriptTarget::Shared(index));
                     }
                     if self.scene.models.is_empty() {
-                        ui.label(RichText::new("Import OBJ, FBX, glTF or GLB.").color(MUTED));
+                        ui.label(
+                            RichText::new(format!(
+                                "Model formats: {}",
+                                import::model_extensions().collect::<Vec<_>>().join(", ")
+                            ))
+                            .color(MUTED),
+                        );
                     }
                     for i in 0..self.scene.models.len() {
                         let model = &self.scene.models[i];

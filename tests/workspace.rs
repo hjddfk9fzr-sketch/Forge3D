@@ -284,3 +284,87 @@ fn duplicate_subtree_keeps_parent_links_and_scene_resource_indices() {
     );
     assert_eq!(scene.models.len(), 1);
 }
+
+#[test]
+fn grid_import_and_reimport_share_geometry_and_preserve_the_saved_project_on_error() {
+    use forge3d::{export, import, workspace::SharedAsset};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("island.forge-project.json");
+    let grid = temp.path().join("island.GRID");
+    fs::write(&grid, ".#\r\n##\r\n").unwrap();
+    let mut project = Project::new("first", &Scene::empty()).unwrap();
+    project.save(&path, false).unwrap();
+    let cli = |command: &str, args: &[&Path]| {
+        Command::new(env!("CARGO_BIN_EXE_forge3d-batch"))
+            .arg(command)
+            .arg(&path)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let result = cli("project-import", &[&grid]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    project = Project::load(&path).unwrap();
+    let (&id, initial) = project.models().iter().next().unwrap();
+    assert_eq!(initial.parts[0].indices.len(), 14 * 6);
+    let mut scene = Scene::empty();
+    scene.models.push(initial.clone());
+    let first = scene
+        .add_object(Object::new("Island", Shape::Model(0)))
+        .unwrap();
+    project.update_scene("first", &scene).unwrap();
+    scene.objects[0].position = [5., 0., -4.];
+    project.add_scene("second", &scene).unwrap();
+    project.create_prefab("island", &scene, first).unwrap();
+    project.save(&path, true).unwrap();
+
+    let id_arg = id.to_string();
+    fs::write(&grid, "###\n###\n").unwrap();
+    let result = cli("project-reimport", &[Path::new(&id_arg), &grid]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let valid_bytes = fs::read(&path).unwrap();
+    project = Project::load(&path).unwrap();
+    let model = &project.models()[&id];
+    assert_eq!(model.parts[0].indices.len(), 22 * 6);
+    assert!(model.parts[0].vertices.iter().any(|v| v.position[0] == 3.));
+    assert_eq!(project.model_usages(id).len(), 3);
+
+    for (input, location) in [
+        ("###\n#x#\n", "line 2, column 2"),
+        ("###\n##\n", "line 2, column 3"),
+        ("...\n", "line 1, column 1"),
+    ] {
+        fs::write(&grid, input).unwrap();
+        let result = cli("project-reimport", &[Path::new(&id_arg), &grid]);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains(location));
+        assert_eq!(fs::read(&path).unwrap(), valid_bytes);
+        assert!(project
+            .reimport_asset(SharedAsset::Model(id), &grid)
+            .is_err());
+        assert_eq!(project.models()[&id].parts[0].indices.len(), 22 * 6);
+    }
+    fs::write(&grid, "#").unwrap();
+    assert!(import::model_under(&grid, &temp.path().join("other")).is_err());
+    let out = temp.path().join("game");
+    export::collection(&project.game(None).unwrap(), &out).unwrap();
+    let game = Game::decode(
+        &fs::read(out.join("assets/scene.json")).unwrap(),
+        Some(&fs::read(out.join("assets/scenes.json")).unwrap()),
+    )
+    .unwrap();
+    for (name, position) in [("first", [0.; 3]), ("second", [5., 0., -4.])] {
+        assert_eq!(game.scenes[name].models[0], project.models()[&id]);
+        assert_eq!(game.scenes[name].objects[0].id, first);
+        assert_eq!(game.scenes[name].objects[0].position, position);
+    }
+    GamePlayback::new(game).unwrap();
+}

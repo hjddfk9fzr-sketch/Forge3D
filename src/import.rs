@@ -1,4 +1,5 @@
 mod fbx;
+mod grid;
 
 use crate::{
     animation::{Clip, Influence, Interpolation, Node, Property, Rig, Skin, Track},
@@ -51,17 +52,64 @@ fn read_path(path: &Path, root: Option<&Path>) -> Result<std::path::PathBuf, Str
     Ok(path)
 }
 
+/// A decoder creates model parts and an optional animation rig. When provided,
+/// the canonical root also constrains any files referenced by the source.
+pub type ModelDecoder = fn(&Path, Option<&Path>) -> Result<(Vec<Part>, Option<Rig>), String>;
+
+struct ModelImporter {
+    extensions: &'static [&'static str],
+    decode: ModelDecoder,
+}
+
+// Register additional decoders here to enable them in the editor, CLI and MCP.
+const MODEL_IMPORTERS: &[ModelImporter] = &[
+    ModelImporter {
+        extensions: &["obj"],
+        decode: |path, root| obj(path, root).map(|parts| (parts, None)),
+    },
+    ModelImporter {
+        extensions: &["fbx"],
+        decode: |path, root| fbx::parts(path, root).map(|parts| (parts, None)),
+    },
+    ModelImporter {
+        extensions: &["gltf", "glb"],
+        decode: gltf_parts,
+    },
+    ModelImporter {
+        extensions: &["grid"],
+        decode: |path, _| grid::parts(path).map(|parts| (parts, None)),
+    },
+];
+
+pub fn model_extensions() -> impl Iterator<Item = &'static str> {
+    MODEL_IMPORTERS
+        .iter()
+        .flat_map(|importer| importer.extensions.iter().copied())
+}
+
 fn import_model(path: &Path, root: Option<&Path>) -> Result<Model, String> {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or_default();
-    let (parts, rig) = match extension.to_ascii_lowercase().as_str() {
-        "obj" => obj(path, root).map(|parts| (parts, None)),
-        "fbx" => fbx::parts(path, root).map(|parts| (parts, None)),
-        "gltf" | "glb" => gltf_parts(path, root),
-        _ => return Err("Choose an OBJ, FBX, glTF or GLB file.".into()),
-    }?;
+    let importer = MODEL_IMPORTERS
+        .iter()
+        .find(|entry| {
+            entry
+                .extensions
+                .iter()
+                .any(|ext| ext.eq_ignore_ascii_case(extension))
+        })
+        .ok_or_else(|| {
+            format!(
+                "Unsupported model extension. Choose {}.",
+                model_extensions()
+                    .map(|ext| format!(".{ext}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    let (parts, rig) = (importer.decode)(path, root)?;
     if parts.is_empty() {
         return Err("The file has no supported triangle meshes.".into());
     }
