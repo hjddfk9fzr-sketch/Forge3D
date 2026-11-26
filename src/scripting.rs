@@ -78,6 +78,7 @@ pub(crate) enum Effect {
     Save(String),
     Resume,
     Sound(String),
+    AnimationSound(String),
     Volume(f32),
 }
 
@@ -316,6 +317,49 @@ impl Scripts {
         }
     }
 
+    pub(crate) fn animation_events(
+        &mut self,
+        scene: &mut Scene,
+        events: &[crate::animation::Event],
+        errors: &mut Vec<String>,
+    ) {
+        for event in events {
+            let Ok(index) = scene.object_index(event.object_id) else {
+                continue;
+            };
+            let Ok(i) = self
+                .instances
+                .binary_search_by_key(&index, |instance| instance.index)
+            else {
+                continue;
+            };
+            let instance = &mut self.instances[i];
+            if !instance.hooks.event {
+                continue;
+            }
+            let data = Map::from_iter([
+                ("kind".into(), "animation".into()),
+                ("clip".into(), event.clip.clone().into()),
+                ("name".into(), event.name.clone().into()),
+                ("time".into(), f64::from(event.time).into()),
+            ]);
+            let object = &mut scene.objects[index];
+            match instance.execute(&self.engine, object, Hook::Event(&data)) {
+                Ok(effects) => append_effects(
+                    &mut self.effects,
+                    effects.into_iter().map(|effect| match effect {
+                        Effect::Sound(id) => Effect::AnimationSound(id),
+                        other => other,
+                    }),
+                ),
+                Err(error) => {
+                    errors.push(format!("{} · on_event: {error}", object.name));
+                    self.instances.remove(i);
+                }
+            }
+        }
+    }
+
     pub(crate) fn camera(
         &mut self,
         scene: &mut Scene,
@@ -380,7 +424,7 @@ enum Hook<'a> {
     Ui(&'a Map),
 }
 
-fn append_effects(pending: &mut Vec<Effect>, effects: Vec<Effect>) {
+fn append_effects(pending: &mut Vec<Effect>, effects: impl IntoIterator<Item = Effect>) {
     const MAX_EFFECTS: usize = 256;
     pending.extend(
         effects

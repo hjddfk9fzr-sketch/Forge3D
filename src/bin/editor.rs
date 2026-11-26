@@ -130,6 +130,8 @@ enum Action {
     AssetUsage,
     ColorShader,
     Reimport(SharedAsset),
+    AddLod(u64),
+    ClearLods(u64),
     BatchImport,
     Dependencies,
 }
@@ -161,6 +163,8 @@ impl Action {
             Self::Dependencies => "Dependencies",
             Self::Reimport(SharedAsset::Model(_)) => "Reimport model",
             Self::Reimport(SharedAsset::Script(_)) => "Reimport script",
+            Self::AddLod(_) => "Add or replace LOD",
+            Self::ClearLods(_) => "Clear LOD levels",
             Self::ColorShader => "Scene color shader",
             Self::AssetUsage => "Where used",
             Self::PrefabCreate => "Create prefab",
@@ -174,6 +178,8 @@ impl Action {
             }
             Self::BatchImport => "Choose files below or enter one path per line. Relative paths use the displayed directory.",
             Self::Dependencies => "Shared assets embedded in the selected scene or prefab.",
+            Self::AddLod(_) => "File for a simpler static mesh with the same origin and scale",
+            Self::ClearLods(_) => "Remove all distance-based levels of this model across the project.",
             Self::Reimport(SharedAsset::Script(_)) => "Replacement .rhai file",
             Self::Reimport(SharedAsset::Model(_)) => "Replacement model file",
             Self::AssetUsage => "Select a model or shared script to see the objects that use it.",
@@ -1609,8 +1615,51 @@ impl Editor {
                             ui.color_edit_button_rgb(&mut light.color);
                             number(ui, "Sun intensity", &mut light.intensity, 0. ..=50.);
                             number(ui, "Ambient", &mut light.ambient, 0. ..=3.);
+                            number(
+                                ui,
+                                "Sky lighting strength",
+                                &mut light.environment_strength,
+                                0. ..=3.,
+                            );
                             ui.checkbox(&mut light.shadows, "Sun shadows");
-                            number(ui, "Shadow coverage", &mut light.shadow_extent, 1. ..=200.);
+                            ui.add_enabled_ui(light.shadows, |ui| {
+                                use lighting::ShadowProfile::{Desktop, Mobile};
+                                egui::ComboBox::from_label("Shadow profile")
+                                    .selected_text(format!("{:?}", light.shadow_profile))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut light.shadow_profile,
+                                            Desktop,
+                                            "Desktop",
+                                        );
+                                        ui.selectable_value(
+                                            &mut light.shadow_profile,
+                                            Mobile,
+                                            "Mobile",
+                                        );
+                                    });
+                                let (resolution, extent) = match light.shadow_profile {
+                                    Desktop => {
+                                        (&mut light.shadow_resolution, &mut light.shadow_extent)
+                                    }
+                                    Mobile => (
+                                        &mut light.mobile_shadow_resolution,
+                                        &mut light.mobile_shadow_extent,
+                                    ),
+                                };
+                                egui::ComboBox::from_label("Shadow map")
+                                    .selected_text(format!("{resolution} × {resolution}"))
+                                    .show_ui(ui, |ui| {
+                                        for size in lighting::SHADOW_RESOLUTIONS {
+                                            ui.selectable_value(
+                                                resolution,
+                                                size,
+                                                format!("{size} × {size}"),
+                                            );
+                                        }
+                                    });
+                                number(ui, "Shadow coverage", extent, 1. ..=200.);
+                            });
                         });
                     ui.separator();
                     if ui.button("Edit scene color shader…").clicked() {
@@ -1703,11 +1752,11 @@ impl Editor {
                         self.dirty |=
                             number(ui, "Movement (units/s)", &mut object.speed, 0. ..=50.);
                     });
-                let rig = match object.shape {
-                    Shape::Model(index) => self.scene.models[index].rig.as_deref(),
+                let model = match object.shape {
+                    Shape::Model(index) => self.scene.models.get(index),
                     _ => None,
                 };
-                rendering_inspector(ui, object, rig);
+                rendering_inspector(ui, object, model);
                 self.dirty |= component_editor::show(ui, object, self.project.as_ref());
                 physics_inspector(ui, object);
                 ui.separator();
@@ -2426,9 +2475,12 @@ impl Editor {
                 .path
                 .as_deref()
                 .unwrap_or(Path::new("scene.forge.json")),
-            Action::BatchImport | Action::Import | Action::ImportScript | Action::Reimport(_) => {
-                Path::new("")
-            }
+            Action::BatchImport
+            | Action::Import
+            | Action::ImportScript
+            | Action::Reimport(_)
+            | Action::AddLod(_)
+            | Action::ClearLods(_) => Path::new(""),
             Action::Export => Path::new("game-export"),
             Action::Build => Path::new("game-build"),
             Action::RetryBuild => Path::new("game-build-retry"),
@@ -2502,6 +2554,7 @@ impl Editor {
                         | Action::Presentation
                         | Action::ColorShader
                         | Action::Dependencies
+                        | Action::ClearLods(_)
                         | Action::AssetUsage
                         | Action::Script
                 ) {
@@ -2548,6 +2601,22 @@ impl Editor {
                     if self.project.is_some() && ui.button(format!("{}…", action.label())).clicked() {
                         self.prompt(action);
                     }
+                    if let SharedAsset::Model(id) = *selected {
+                        let model=&project.models()[&id];
+                        for level in model.lods.iter() {
+                            let triangles=level.parts.iter().map(|part|part.indices.len()/3).sum::<usize>();
+                            ui.label(format!("LOD at {:.2} units · {triangles} triangles",level.distance));
+                        }
+                        if self.project.is_some() && model.rig.is_none() {
+                            if ui.button("Add or replace LOD…").clicked() {
+                                self.prompt(Action::AddLod(id));
+                                if let Some(next)=&mut self.dialog {next.scene_id="20".into();}
+                            }
+                            if !model.lods.is_empty() && ui.button("Clear LOD levels…").clicked() {
+                                self.prompt(Action::ClearLods(id));
+                            }
+                        }
+                    }
                     if rows.is_empty() {
                         ui.label("Not used in this project.");
                     } else {
@@ -2559,6 +2628,10 @@ impl Editor {
                                 }
                             });
                     }
+                }
+                if matches!(dialog.action,Action::AddLod(_)) {
+                    ui.label("Distance (scene units)");
+                    ui.text_edit_singleline(&mut dialog.scene_id);
                 }
                 if let Action::Reimport(id) = dialog.action {
                     ui.label(format!("Update {id} across all scenes and prefabs."));
@@ -2720,10 +2793,29 @@ impl Editor {
                     imported.len()
                 ))
             }
-            Action::Reimport(id) => {
+            Action::Reimport(_) | Action::AddLod(_) | Action::ClearLods(_) => {
                 let open = self.project.as_mut().ok_or("Open a project first.")?;
                 let mut candidate = open.snapshot(&self.scene)?;
-                candidate.reimport_asset(id, path)?;
+                let status = match dialog.action {
+                    Action::Reimport(id) => {
+                        candidate.reimport_asset(id, path)?;
+                        format!("Reimported {id}")
+                    }
+                    Action::AddLod(id) => {
+                        let distance = dialog
+                            .scene_id
+                            .trim()
+                            .parse::<f32>()
+                            .map_err(|_| "Enter a distance in scene units.")?;
+                        candidate.set_model_lod(id, distance, import::model(path)?)?;
+                        format!("Updated LODs on model #{id}")
+                    }
+                    Action::ClearLods(id) => {
+                        candidate.clear_model_lods(id)?;
+                        format!("Cleared LODs on model #{id}")
+                    }
+                    _ => unreachable!(),
+                };
                 let scene = candidate.scene(&open.active)?;
                 open.project = candidate;
                 self.prepared = PreparedScene::new(&scene);
@@ -2733,9 +2825,7 @@ impl Editor {
                 self.history = project::History::default();
                 self.scene_epoch += 1;
                 self.pointer_edit = false;
-                Ok(format!(
-                    "Reimported {id} · save the project to keep the replacement"
-                ))
+                Ok(format!("{status} · save the project to keep the change"))
             }
             Action::AssetUsage => Ok("Asset usage closed".into()),
             Action::New => {
@@ -2981,7 +3071,67 @@ fn application_inspector(ui: &mut egui::Ui, app: &mut Application) {
     });
 }
 
-fn rendering_inspector(ui: &mut egui::Ui, object: &mut Object, rig: Option<&animation::Rig>) {
+fn animation_markers(
+    ui: &mut egui::Ui,
+    clip: &animation::Clip,
+    overrides: &mut std::collections::BTreeMap<String, Vec<animation::Marker>>,
+) {
+    ui.separator();
+    ui.label("Clip events");
+    let mut markers = overrides.get(&clip.name).unwrap_or(&clip.markers).clone();
+    let mut remove = None;
+    for (index, marker) in markers.iter_mut().enumerate() {
+        ui.push_id(index, |ui| {
+            ui.horizontal(|ui| {
+                let mut name = marker.name.clone();
+                if ui
+                    .add(egui::TextEdit::singleline(&mut name).desired_width(100.))
+                    .changed()
+                    && !name.trim().is_empty()
+                    && name.len() <= 80
+                {
+                    marker.name = name;
+                }
+                ui.add(
+                    egui::DragValue::new(&mut marker.time)
+                        .range(0. ..=clip.duration)
+                        .speed(0.01)
+                        .suffix(" s"),
+                );
+                if ui.small_button("Remove").clicked() {
+                    remove = Some(index);
+                }
+            })
+        });
+    }
+    if let Some(index) = remove {
+        markers.remove(index);
+    }
+    if ui
+        .add_enabled(
+            markers.len() < animation::MAX_MARKERS,
+            egui::Button::new("Add event"),
+        )
+        .clicked()
+    {
+        markers.push(animation::Marker {
+            name: "event".into(),
+            time: clip.duration * 0.5,
+        });
+    }
+    if overrides.contains_key(&clip.name) && ui.small_button("Restore clip events").clicked() {
+        overrides.remove(&clip.name);
+    } else if markers != *overrides.get(&clip.name).unwrap_or(&clip.markers) {
+        overrides.insert(clip.name.clone(), markers);
+    }
+}
+
+fn rendering_inspector(
+    ui: &mut egui::Ui,
+    object: &mut Object,
+    model: Option<&forge3d::runtime::Model>,
+) {
+    let rig = model.and_then(|model| model.rig.as_deref());
     if let Some(rig) = rig.filter(|rig| !rig.clips.is_empty()) {
         egui::CollapsingHeader::new("Animation")
             .default_open(true)
@@ -3003,6 +3153,13 @@ fn rendering_inspector(ui: &mut egui::Ui, object: &mut Object, rig: Option<&anim
                         ..animation::Player::default()
                     });
                 }
+                number(
+                    ui,
+                    "Transition (s)",
+                    &mut object.animation_blend,
+                    0. ..=animation::MAX_BLEND_SECONDS,
+                );
+                let character = object.is_character();
                 if let Some(player) = &mut object.animation {
                     let duration = rig
                         .clips
@@ -3011,9 +3168,25 @@ fn rendering_inspector(ui: &mut egui::Ui, object: &mut Object, rig: Option<&anim
                         .map_or(0., |clip| clip.duration);
                     number(ui, "Start time (s)", &mut player.time, 0. ..=duration);
                     number(ui, "Speed", &mut player.speed, -10. ..=10.);
+                    if character {
+                        ui.checkbox(
+                            &mut object.animate_grounded_motion,
+                            "Play while moving on ground",
+                        );
+                    }
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut player.playing, "Play");
                         ui.checkbox(&mut player.looping, "Loop");
+                    });
+                }
+                if let Some(clip) = object
+                    .animation
+                    .as_ref()
+                    .and_then(|p| rig.clips.iter().find(|c| c.name == p.clip))
+                    .filter(|c| c.duration > 0.)
+                {
+                    ui.push_id(&clip.name, |ui| {
+                        animation_markers(ui, clip, &mut object.animation_markers)
                     });
                 }
             });
@@ -3041,6 +3214,25 @@ fn rendering_inspector(ui: &mut egui::Ui, object: &mut Object, rig: Option<&anim
                 surface.emissive = surface.emissive.map(|value| value.clamp(0., 50.));
                 ui.checkbox(&mut surface.unlit, "Unlit");
                 ui.checkbox(&mut surface.use_color_shader, "Use scene color shader");
+            }
+            if let Some(map) =
+                model.and_then(|m| m.parts.iter().find_map(|p| p.normal_map.as_ref()))
+            {
+                let mut strength = object.normal_strength.is_some();
+                if ui
+                    .checkbox(&mut strength, "Override normal strength")
+                    .changed()
+                {
+                    object.normal_strength = strength.then_some(map.strength);
+                }
+                if let Some(strength) = &mut object.normal_strength {
+                    number(ui, "Normal strength", strength, -10. ..=10.);
+                } else {
+                    ui.label(format!(
+                        "Normal strength inherited ({:.2} on first mapped material)",
+                        map.strength
+                    ));
+                }
             }
             let mut point = object.light.is_some();
             if ui.checkbox(&mut point, "Point light").changed() {

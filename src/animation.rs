@@ -50,6 +50,36 @@ pub struct Clip {
     pub name: String,
     pub duration: f32,
     pub tracks: Vec<Track>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
+}
+
+pub const MAX_MARKERS: usize = 64;
+pub const MAX_BLEND_SECONDS: f32 = 5.;
+pub(crate) const MAX_EVENTS: usize = 256;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Marker {
+    pub time: f32,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Event {
+    pub object_id: u64,
+    pub clip: String,
+    pub name: String,
+    pub time: f32,
+}
+
+pub(crate) fn valid_markers(markers: &[Marker], duration: f32) -> bool {
+    markers.len() <= MAX_MARKERS
+        && markers.iter().all(|marker| {
+            duration > 0.
+                && (0. ..=duration).contains(&marker.time)
+                && !marker.name.trim().is_empty()
+                && marker.name.len() <= 80
+        })
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -121,6 +151,7 @@ impl Rig {
             && self.clips.iter().all(|clip| {
                 clip.duration.is_finite()
                     && clip.duration >= 0.
+                    && valid_markers(&clip.markers, clip.duration)
                     && clip.tracks.iter().all(|track| {
                         let stride = if track.interpolation == Interpolation::Cubic {
                             3
@@ -142,7 +173,7 @@ impl Rig {
             })
     }
 
-    pub fn pose(&self, player: Option<&Player>) -> Pose {
+    fn sample(&self, player: Option<&Player>) -> Vec<Node> {
         let mut nodes = self.nodes.clone();
         if let Some((player, clip)) = player.and_then(|player| {
             self.clips
@@ -160,6 +191,14 @@ impl Rig {
                 }
             }
         }
+        nodes
+    }
+
+    pub fn pose(&self, player: Option<&Player>) -> Pose {
+        self.compose(&self.sample(player))
+    }
+
+    fn compose(&self, nodes: &[Node]) -> Pose {
         let mut global = vec![Mat4::IDENTITY; nodes.len()];
         for index in self.order() {
             let node = &nodes[index];
@@ -191,12 +230,155 @@ impl Rig {
     }
 }
 
+/// Playback-only state. The scene stores the target clip and blend duration.
+#[derive(Clone, Debug, PartialEq)]
+#[doc(hidden)]
+pub struct BlendState {
+    target: Option<Player>,
+    transition: Option<Transition>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Transition {
+    from: Source,
+    duration: f32,
+    elapsed: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Source {
+    Clip(Option<Player>),
+    Pose(Vec<Node>),
+}
+
+impl BlendState {
+    pub(crate) fn new(player: Option<&Player>) -> Self {
+        Self {
+            target: player.cloned(),
+            transition: None,
+        }
+    }
+
+    pub(crate) fn select(&mut self, rig: &Rig, next: Option<&Player>, seconds: f32) {
+        if next.map(|p| p.clip.as_str()) != self.target.as_ref().map(|p| p.clip.as_str()) {
+            let from = if self.transition.is_some() {
+                Source::Pose(self.sample(rig))
+            } else {
+                Source::Clip(self.target.take())
+            };
+            self.transition = Some(Transition {
+                from,
+                duration: seconds,
+                elapsed: 0.,
+            });
+        }
+        self.target = next.cloned();
+    }
+
+    pub(crate) fn advance(
+        &mut self,
+        model: &Model,
+        player: Option<&Player>,
+        dt: f32,
+        motion: bool,
+    ) {
+        self.target = player.cloned();
+        let Some(transition) = &mut self.transition else {
+            return;
+        };
+        if let Source::Clip(Some(source)) = &mut transition.from {
+            advance(model, source, if motion { dt } else { 0. });
+        }
+        transition.elapsed += dt;
+        if transition.elapsed >= transition.duration {
+            self.transition = None;
+        }
+    }
+
+    fn sample(&self, rig: &Rig) -> Vec<Node> {
+        let mut target = rig.sample(self.target.as_ref());
+        if let Some(fade) = &self.transition {
+            let sampled;
+            let from = match &fade.from {
+                Source::Clip(player) => {
+                    sampled = rig.sample(player.as_ref());
+                    &sampled
+                }
+                Source::Pose(pose) => pose,
+            };
+            let weight = (fade.elapsed / fade.duration).clamp(0., 1.);
+            for (node, old) in target.iter_mut().zip(from) {
+                let lerp = |a: [f32; 3], b| {
+                    Vec3::from_array(a)
+                        .lerp(Vec3::from_array(b), weight)
+                        .to_array()
+                };
+                node.position = lerp(old.position, node.position);
+                node.scale = lerp(old.scale, node.scale);
+                node.rotation = quaternion(Vec4::from_array(old.rotation))
+                    .slerp(quaternion(Vec4::from_array(node.rotation)), weight)
+                    .to_array();
+            }
+        }
+        target
+    }
+
+    pub(crate) fn pose(&self, rig: &Rig) -> Pose {
+        rig.compose(&self.sample(rig))
+    }
+}
+
 pub struct Pose {
     global: Vec<Transform>,
     joints: Vec<Vec<Transform>>,
 }
 
 impl Pose {
+    pub(crate) fn tangent(
+        &self,
+        part: &Part,
+        index: usize,
+        normal: [f32; 3],
+        frame: [f32; 4],
+    ) -> [f32; 4] {
+        let [x, y, z, hand] = frame;
+        let t = Vec3::new(x, y, z);
+        let b = Vec3::from_array(part.vertices[index].normal).cross(t) * hand;
+        let (t, b) = if let Some((skin, influence)) = part
+            .skin
+            .zip(part.influences.get(index))
+            .filter(|(_, influence)| influence.weights.iter().any(|&w| w > 0.))
+        {
+            influence
+                .joints
+                .into_iter()
+                .zip(influence.weights)
+                .filter(|&(_, w)| w > 0.)
+                .fold(
+                    (Vec3::ZERO, Vec3::ZERO),
+                    |(sum_t, sum_b), (joint, weight)| {
+                        let transform = self.joints[skin][usize::from(joint)].matrix;
+                        (
+                            sum_t + transform.transform_vector3(t) * weight,
+                            sum_b + transform.transform_vector3(b) * weight,
+                        )
+                    },
+                )
+        } else if let Some(node) = part.node {
+            let transform = self.global[node].matrix;
+            (
+                transform.transform_vector3(t),
+                transform.transform_vector3(b),
+            )
+        } else {
+            (t, b)
+        };
+        let n = Vec3::from_array(normal);
+        let t = (t - n * n.dot(t)).normalize_or_zero();
+        t.extend(if n.cross(t).dot(b) < 0. { -1. } else { 1. })
+            .to_array()
+    }
+
     pub fn vertex(&self, part: &Part, index: usize) -> ModelVertex {
         let vertex = part.vertices[index];
         let position = Vec3::from_array(vertex.position);
@@ -304,26 +486,214 @@ fn quaternion(value: Vec4) -> Quat {
     }
 }
 
+impl Model {
+    pub fn animation_clip(&self, name: &str) -> Option<&Clip> {
+        self.rig
+            .as_ref()?
+            .clips
+            .iter()
+            .find(|clip| clip.name == name)
+    }
+}
+
 pub fn advance(model: &Model, player: &mut Player, dt: f32) {
-    let Some(clip) = model
-        .rig
-        .as_ref()
-        .and_then(|rig| rig.clips.iter().find(|clip| clip.name == player.clip))
-    else {
-        return;
-    };
+    if let Some(clip) = model.animation_clip(&player.clip) {
+        advance_markers(clip, player, dt, &[], 0, |_| {});
+    }
+}
+
+// Emit crossings over (start, end] forward or [end, start) in reverse.
+// At a loop boundary, markers at zero and duration are distinct entries.
+pub(crate) fn advance_markers(
+    clip: &Clip,
+    player: &mut Player,
+    dt: f32,
+    markers: &[Marker],
+    limit: usize,
+    mut emit: impl FnMut(&Marker),
+) {
     if !player.playing {
         return;
     }
-    let time = player.time + dt * player.speed;
     if clip.duration <= 0. {
         player.time = 0.;
-    } else if player.looping {
-        player.time = time.rem_euclid(clip.duration);
+        return;
+    }
+    let duration = f64::from(clip.duration);
+    let start = f64::from(player.time);
+    let start = if player.looping {
+        start.rem_euclid(duration)
     } else {
-        player.time = time.clamp(0., clip.duration);
-        if (player.speed > 0. && time >= clip.duration) || (player.speed < 0. && time <= 0.) {
+        start
+    };
+    let delta = f64::from(dt) * f64::from(player.speed);
+    let end = start + delta;
+    // Match the crossing interval to the phase actually stored for the next tick.
+    let end = if player.looping {
+        let phase = end.rem_euclid(duration);
+        let time = phase as f32;
+        player.time = if time == clip.duration { 0. } else { time };
+        end - phase + f64::from(time)
+    } else {
+        player.time = end.clamp(0., duration) as f32;
+        if (delta > 0. && player.time >= clip.duration) || (delta < 0. && player.time <= 0.) {
             player.playing = false;
         }
+        f64::from(player.time)
+    };
+    let traveled = (end - start) * delta.signum();
+    if traveled <= 0. || markers.is_empty() || limit == 0 {
+        return;
+    }
+
+    let mut crossings: Vec<_> = markers
+        .iter()
+        .filter_map(|marker| {
+            let offset = (f64::from(marker.time) - start) * delta.signum();
+            let distance = if player.looping {
+                let distance = offset.rem_euclid(duration);
+                if distance == 0. {
+                    duration
+                } else {
+                    distance
+                }
+            } else {
+                offset
+            };
+            (distance > 0. && distance <= traveled).then_some((distance, marker))
+        })
+        .collect();
+    crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut count = 0;
+    let mut cycle = 0.;
+    while !crossings.is_empty() {
+        for &(distance, marker) in &crossings {
+            if count == limit || cycle + distance > traveled {
+                return;
+            }
+            emit(marker);
+            count += 1;
+        }
+        if !player.looping {
+            return;
+        }
+        cycle += duration;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marker_crossings_respect_pause_speed_direction_and_loop_boundaries() {
+        let clip = Clip {
+            name: "Stride".into(),
+            duration: 1.,
+            tracks: vec![],
+            markers: [(0.75, "late"), (0.25, "early"), (0., "start"), (1., "end")]
+                .map(|(time, name)| Marker {
+                    time,
+                    name: name.into(),
+                })
+                .to_vec(),
+        };
+        let mut player = Player {
+            time: 0.125,
+            speed: 2.,
+            playing: false,
+            ..Player::default()
+        };
+        let tick = |p: &mut Player, dt| {
+            let mut fired = vec![];
+            advance_markers(&clip, p, dt, &clip.markers, MAX_EVENTS, |m| {
+                fired.push(m.name.clone())
+            });
+            fired
+        };
+        assert!(tick(&mut player, 0.5).is_empty());
+        assert_eq!(player.time, 0.125);
+        player.playing = true;
+        assert_eq!(tick(&mut player, 0.0625), ["early"]);
+        assert!(tick(&mut player, 0.0625).is_empty());
+        assert_eq!(tick(&mut player, 0.375), ["late", "start", "end"]);
+        assert_eq!(player.time, 0.125);
+        player.speed = -2.;
+        assert_eq!(tick(&mut player, 0.25), ["start", "end", "late"]);
+        player.looping = false;
+        assert_eq!(tick(&mut player, 0.5), ["early", "start"]);
+        assert_eq!(player.time, 0.);
+        assert!(!player.playing);
+        assert!(tick(&mut player, 0.25).is_empty());
+    }
+
+    #[test]
+    fn rapid_retarget_starts_at_the_visible_pose_and_finishes_at_the_new_clip() {
+        let clip = |name: &str, x: f32| Clip {
+            name: name.into(),
+            duration: 1.,
+            markers: vec![],
+            tracks: vec![Track {
+                node: 0,
+                property: Property::Translation,
+                interpolation: Interpolation::Linear,
+                times: vec![0., 1.],
+                values: vec![[x, 0., 0., 0.], [x + 2., 0., 0., 0.]],
+            }],
+        };
+        let rig = Rig {
+            nodes: vec![Node {
+                parent: None,
+                position: [0.; 3],
+                rotation: Quat::IDENTITY.to_array(),
+                scale: [1.; 3],
+            }],
+            skins: vec![],
+            clips: vec![clip("Idle", 0.), clip("Walk", 10.), clip("Run", 20.)],
+        };
+        let player = |name: &str| Player {
+            clip: name.into(),
+            ..Player::default()
+        };
+        let model = Model {
+            lods: Default::default(),
+            name: "test".into(),
+            parts: vec![].into(),
+            rig: Some(rig.clone().into()),
+        };
+        let idle = player("Idle");
+        let walk = player("Walk");
+        let run = player("Run");
+        let mut blend = BlendState::new(Some(&idle));
+        let x = |b: &BlendState| b.sample(&rig)[0].position[0];
+        blend.select(&rig, Some(&walk), 0.4);
+        assert_eq!(x(&blend), 0.);
+        blend.advance(&model, Some(&walk), 0.2, true);
+        assert!((x(&blend) - 5.2).abs() < 1e-5);
+        let visible = x(&blend);
+        blend.select(&rig, Some(&run), 0.4);
+        assert_eq!(x(&blend), visible);
+        blend.advance(&model, Some(&run), 0.4, true);
+        assert_eq!(x(&blend), 20.);
+        assert!(blend.transition.is_none());
+    }
+
+    #[test]
+    fn normal_map_frame_follows_skinned_geometry_and_reflections() {
+        let mut model = crate::runtime::Scene::rendering_demo().models.remove(0);
+        let rig = std::sync::Arc::make_mut(model.rig.as_mut().unwrap());
+        rig.nodes[0].rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2).to_array();
+        rig.nodes[0].scale = [-1., 1., 1.];
+        let pose = rig.pose(None);
+        let part = &model.parts[0];
+        let original = Vec3::from_array(part.vertices[0].normal);
+        let t = crate::runtime::tangent_reference(original);
+        let normal = pose.vertex(part, 0).normal;
+        let tangent = Vec4::from_array(pose.tangent(part, 0, normal, t.extend(1.).to_array()));
+        let expected =
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2) * (t * Vec3::new(-1., 1., 1.));
+        assert!(tangent.truncate().distance(expected) < 1e-5);
+        assert!(tangent.truncate().dot(Vec3::from_array(normal)).abs() < 1e-5);
+        assert_eq!(tangent.w, -1.);
     }
 }

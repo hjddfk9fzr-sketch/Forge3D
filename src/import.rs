@@ -1,10 +1,11 @@
 mod fbx;
 mod grid;
+mod tangents;
 
 use crate::{
     animation::{Clip, Influence, Interpolation, Node, Property, Rig, Skin, Track},
     lighting::{Alpha, Surface},
-    runtime::{Model, ModelVertex, Part},
+    runtime::{Model, ModelVertex, NormalMap, Part},
 };
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use macroquad::prelude::{Mat4, Vec3};
@@ -114,6 +115,7 @@ fn import_model(path: &Path, root: Option<&Path>) -> Result<Model, String> {
         return Err("The file has no supported triangle meshes.".into());
     }
     Ok(Model {
+        lods: Default::default(),
         name: path
             .file_stem()
             .unwrap_or_default()
@@ -381,6 +383,7 @@ fn gltf_rig(
                 name,
                 duration,
                 tracks,
+                markers: Vec::new(),
             });
         }
     }
@@ -422,11 +425,15 @@ fn gltf_node(
             let base = pbr.base_color_texture();
             let metal = pbr.metallic_roughness_texture();
             let emission = material.emissive_texture();
+            let normal_map = material.normal_texture();
             let uv_set = base
                 .as_ref()
                 .or(metal.as_ref())
                 .or(emission.as_ref())
-                .map_or(0, |info| info.tex_coord());
+                .map_or_else(
+                    || normal_map.as_ref().map_or(0, |info| info.tex_coord()),
+                    |info| info.tex_coord(),
+                );
             let mut uv = reader.read_tex_coords(uv_set).map(|value| value.into_f32());
             let mut color = reader.read_colors(0).map(|value| value.into_rgba_f32());
             let mut normals = reader.read_normals();
@@ -505,6 +512,36 @@ fn gltf_node(
                 }
                 part.skin = Some(skin.index());
             }
+            if let Some(info) = normal_map.filter(|info| info.tex_coord() == uv_set) {
+                if reader.read_tex_coords(info.tex_coord()).is_some() {
+                    let authored = reader.read_tangents().map(|values| {
+                        values
+                            .map(|[x, y, z, w]| {
+                                local
+                                    .transform_vector3(Vec3::new(x, y, z))
+                                    .normalize_or_zero()
+                                    .extend(if w * local.determinant() < 0. {
+                                        -1.
+                                    } else {
+                                        1.
+                                    })
+                                    .to_array()
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    let tangents = authored
+                        .filter(|values| {
+                            values.len() == part.vertices.len()
+                                && values.iter().all(|t| t.iter().all(|v| v.is_finite()))
+                        })
+                        .unwrap_or_else(|| tangents::generate(&mut part));
+                    part.normal_map = Some(NormalMap {
+                        texture: gltf_png(&images[info.texture().source().index()])?,
+                        strength: info.scale(),
+                        tangents,
+                    });
+                }
+            }
             parts.push(part);
         }
     }
@@ -549,6 +586,7 @@ fn finish(
     Ok(Part {
         surface: Surface::default(),
         metallic_roughness: None,
+        normal_map: None,
         emissive_texture: None,
         node: None,
         skin: None,

@@ -157,6 +157,7 @@ struct Entry {
     pose: Pose,
     vertical_speed: f32,
     grounded: bool,
+    moved_on_ground: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -259,6 +260,12 @@ impl Physics {
         Ok(Some(world))
     }
 
+    pub(crate) fn moving_on_ground(&self, index: usize) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.index == index && e.moved_on_ground)
+    }
+
     pub(crate) fn sync(&mut self, scene: &Scene) -> Result<(), String> {
         let poses = poses(scene);
         let mut indices = std::collections::HashMap::new();
@@ -332,6 +339,7 @@ impl Physics {
                 pose,
                 vertical_speed: 0.,
                 grounded: false,
+                moved_on_ground: false,
             });
         }
         self.queries.update(&self.colliders);
@@ -476,6 +484,8 @@ impl Physics {
                 |_| {},
             );
             entry.grounded = motion.grounded && entry.vertical_speed <= 0.;
+            entry.moved_on_ground =
+                entry.grounded && motion.translation.x.hypot(motion.translation.z) > 0.0001;
             if entry.grounded
                 || (entry.vertical_speed > 0.
                     && motion.translation.y < entry.vertical_speed * STEP - 0.001)

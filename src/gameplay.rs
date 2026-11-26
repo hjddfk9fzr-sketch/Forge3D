@@ -75,12 +75,19 @@ pub enum Command {
         value: Value,
     },
     Send(Message),
+    PlaySound(String),
+    PlayAnimation {
+        id: u64,
+        clip: String,
+    },
 }
 
 pub struct Context<'a> {
     pub scene: &'a Scene,
     pub object: &'a Object,
     pub data: &'a Value,
+    /// Clip events emitted during the current tick.
+    pub animation_events: &'a [crate::animation::Event],
     pub messages: &'a [Message],
     pub dt: f32,
     pub actions: crate::controls::GameActions,
@@ -107,6 +114,7 @@ impl Systems {
         messages: &mut Vec<Message>,
         dt: f32,
     ) -> Result<(), String> {
+        let animation_events = play.take_animation_events();
         let incoming = std::mem::take(messages);
         let mut commands = Vec::new();
         for object in &play.scene().objects {
@@ -118,6 +126,7 @@ impl Systems {
                             object,
                             data,
                             messages: &incoming,
+                            animation_events: &animation_events,
                             actions: play.actions,
                             dt,
                         },
@@ -130,6 +139,7 @@ impl Systems {
             return Ok(());
         }
         let mut next = play.scene().clone();
+        let mut sounds = Vec::new();
         let mut outgoing = Vec::new();
         let mut changed = false;
         for command in commands {
@@ -156,12 +166,31 @@ impl Systems {
                     next.objects[index].components.insert(component, value);
                     changed = true;
                 }
+                Command::PlayAnimation { id, clip } => {
+                    let index = next.object_index(id)?;
+                    let object = &mut next.objects[index];
+                    if object.animation.as_ref().map_or("", |p| p.clip.as_str()) != clip {
+                        if object.animation_blend > 0. && object.animation_blend_state.is_none() {
+                            object.animation_blend_state =
+                                Some(crate::animation::BlendState::new(object.animation.as_ref()));
+                        }
+                        object.animation = (!clip.is_empty()).then(|| crate::animation::Player {
+                            clip,
+                            time: 0.,
+                            playing: true,
+                            ..object.animation.clone().unwrap_or_default()
+                        });
+                        changed = true;
+                    }
+                }
                 Command::Send(message) => outgoing.push(message),
+                Command::PlaySound(id) => sounds.push(crate::scripting::Effect::AnimationSound(id)),
             }
         }
         if changed {
             play.commit_objects(next)?;
         }
+        play.extend_effects(sounds);
         outgoing.retain(|m| play.scene().object_index(m.to).is_ok());
         *messages = outgoing;
         Ok(())

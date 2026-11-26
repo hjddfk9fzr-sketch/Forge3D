@@ -10,6 +10,18 @@ pub fn game_systems() -> Systems {
         .register("workshop.inventory", receive_pickup)
         .unwrap();
     systems
+        .register("cloud-relay.footsteps", footsteps)
+        .unwrap();
+    systems
+}
+
+fn footsteps(ctx: Context<'_>, commands: &mut Vec<Command>) -> Result<(), String> {
+    for event in ctx.animation_events {
+        if event.object_id == ctx.object.id && event.name == "footstep" {
+            commands.push(Command::PlaySound("footstep".into()));
+        }
+    }
+    Ok(())
 }
 
 fn spawn_pickup(ctx: Context<'_>, commands: &mut Vec<Command>) -> Result<(), String> {

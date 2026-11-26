@@ -230,9 +230,14 @@ impl GamePlayback {
                         }
                     }
                 }
-                Effect::Sound(id) => {
+                sound @ (Effect::Sound(_) | Effect::AnimationSound(_)) => {
+                    let (id, repeat) = match sound {
+                        Effect::Sound(id) => (id, false),
+                        Effect::AnimationSound(id) => (id, true),
+                        _ => unreachable!(),
+                    };
                     if self.scene().presentation.sounds.contains_key(&id) {
-                        if self.sounds.len() < 16 && !self.sounds.contains(&id) {
+                        if self.sounds.len() < 16 && (repeat || !self.sounds.contains(&id)) {
                             self.sounds.push(id);
                         }
                     } else {

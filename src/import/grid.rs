@@ -60,6 +60,7 @@ pub(super) fn parts(path: &Path) -> Result<Vec<Part>, String> {
             ..Default::default()
         },
         metallic_roughness: None,
+        normal_map: None,
         emissive_texture: None,
         node: None,
         skin: None,

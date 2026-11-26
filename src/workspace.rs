@@ -79,7 +79,7 @@ impl Project {
         first.application.title = "Forge3D · Two Workshops".into();
         first.application.identifier = "com.forge3d.betademo".into();
         first.application.version = env!("CARGO_PKG_VERSION").into();
-        first.application.version_code = 143;
+        first.application.version_code = 150;
         first.objects[0].script = Some(
             r#"fn update(object, dt, input) {
                 if input.x > 0.5 { object.next_scene = "workshop"; }
@@ -551,11 +551,54 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
 
     pub fn reimport_asset(&mut self, asset: SharedAsset, path: &Path) -> Result<(), String> {
         match asset {
-            SharedAsset::Model(id) => self.reimport_model(id, crate::import::model(path)?),
+            SharedAsset::Model(id) => {
+                let mut replacement = crate::import::model(path)?;
+                if let Some(model) = self.models.get(&id) {
+                    replacement.lods = model.lods.clone();
+                }
+                self.reimport_model(id, replacement)
+            }
             SharedAsset::Script(id) => {
                 self.reimport_script(id, crate::import::script(path)?.source)
             }
         }
+    }
+
+    pub fn set_model_lod(
+        &mut self,
+        id: AssetId,
+        distance: f32,
+        level: Model,
+    ) -> Result<(), String> {
+        if !distance.is_finite() || level.rig.is_some() {
+            return Err("Use a finite distance and a static LOD model.".into());
+        }
+        let mut replacement = self
+            .models
+            .get(&id)
+            .ok_or_else(|| format!("Unknown shared model {id}."))?
+            .clone();
+        let mut lods = replacement.lods.to_vec();
+        let entry = crate::runtime::LodLevel {
+            distance,
+            parts: level.parts,
+        };
+        match lods.binary_search_by(|lod| lod.distance.total_cmp(&distance)) {
+            Ok(i) => lods[i] = entry,
+            Err(i) => lods.insert(i, entry),
+        }
+        replacement.lods = lods.into();
+        self.reimport_model(id, replacement)
+    }
+
+    pub fn clear_model_lods(&mut self, id: AssetId) -> Result<(), String> {
+        let mut model = self
+            .models
+            .get(&id)
+            .ok_or_else(|| format!("Unknown shared model {id}."))?
+            .clone();
+        model.lods = Default::default();
+        self.reimport_model(id, model)
     }
 
     pub fn reimport_model(&mut self, id: AssetId, mut replacement: Model) -> Result<(), String> {

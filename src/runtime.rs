@@ -106,8 +106,19 @@ pub struct Object {
     pub components: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<Player>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub animation_blend: f32,
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub animation_blend_state: Option<animation::BlendState>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub animation_markers: std::collections::BTreeMap<String, Vec<animation::Marker>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub animate_grounded_motion: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub surface: Option<Surface>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_strength: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub light: Option<PointLight>,
     #[serde(default = "casts_shadows")]
@@ -154,12 +165,21 @@ fn casts_shadows() -> bool {
     true
 }
 
+fn is_zero(value: &f32) -> bool {
+    *value == 0.
+}
+
 impl Object {
     pub fn new(name: impl Into<String>, shape: Shape) -> Self {
         Self {
             prefab: None,
             animation: None,
+            animation_blend: 0.,
+            animation_blend_state: None,
+            animation_markers: Default::default(),
+            animate_grounded_motion: false,
             surface: None,
+            normal_strength: None,
             light: None,
             cast_shadows: true,
             components: Default::default(),
@@ -177,6 +197,13 @@ impl Object {
             speed: 0.,
             script: None,
         }
+    }
+
+    pub(crate) fn animation_pose(&self, rig: &Rig) -> animation::Pose {
+        self.animation_blend_state.as_ref().map_or_else(
+            || rig.pose(self.animation.as_ref()),
+            |blend| blend.pose(rig),
+        )
     }
 
     pub fn is_character(&self) -> bool {
@@ -207,12 +234,55 @@ pub struct Model {
     pub parts: Arc<[Part]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rig: Option<Arc<Rig>>,
+    #[serde(default, skip_serializing_if = "is_empty_lods")]
+    pub lods: Arc<[LodLevel]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LodLevel {
+    pub distance: f32,
+    pub parts: Arc<[Part]>,
+}
+
+fn is_empty_lods(levels: &[LodLevel]) -> bool {
+    levels.is_empty()
+}
+
+impl Model {
+    pub const MAX_LODS: usize = 4;
+
+    pub fn lod_level(&self, distance: f32, previous: Option<usize>) -> usize {
+        let Some(mut level) = previous.filter(|&i| i <= self.lods.len()) else {
+            return self
+                .lods
+                .partition_point(|entry| entry.distance <= distance);
+        };
+        while level < self.lods.len() && distance >= self.lods[level].distance * 1.1 {
+            level += 1;
+        }
+        while level > 0 && distance < self.lods[level - 1].distance * 0.9 {
+            level -= 1;
+        }
+        level
+    }
+
+    pub fn parts_at(&self, level: usize) -> &[Part] {
+        level
+            .checked_sub(1)
+            .and_then(|i| self.lods.get(i))
+            .map_or(&self.parts, |lod| &lod.parts)
+    }
+}
+
+fn triangle_count(parts: &[Part]) -> usize {
+    parts.iter().map(|part| part.indices.len() / 3).sum()
 }
 
 impl PartialEq for Model {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && (Arc::ptr_eq(&self.parts, &other.parts) || self.parts == other.parts)
+            && (Arc::ptr_eq(&self.lods, &other.lods) || self.lods == other.lods)
             && match (&self.rig, &other.rig) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
                 (None, None) => true,
@@ -234,6 +304,8 @@ pub struct Part {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metallic_roughness: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_map: Option<NormalMap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emissive_texture: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<usize>,
@@ -245,6 +317,13 @@ pub struct Part {
     pub indices: Vec<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NormalMap {
+    pub texture: Vec<u8>,
+    pub strength: f32,
+    pub tangents: Vec<[f32; 4]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -429,6 +508,7 @@ fn on_event(object, event) {
             indices,
             texture: None,
             metallic_roughness: None,
+            normal_map: None,
             emissive_texture: None,
             node: Some(0),
             skin: Some(0),
@@ -463,6 +543,7 @@ fn on_event(object, event) {
         let clip = |name: &str, axis: Vec3, angle: f32| Clip {
             name: name.into(),
             duration: 2.4,
+            markers: Vec::new(),
             tracks: vec![Track {
                 node: 1,
                 property: Property::Rotation,
@@ -474,6 +555,7 @@ fn on_event(object, event) {
             }],
         };
         scene.models.push(Model {
+            lods: Default::default(),
             name: "Workshop Arm".into(),
             parts: vec![part].into(),
             rig: Some(Arc::new(Rig {
@@ -747,18 +829,39 @@ fn on_event(object, event) {
             {
                 return Err(format!("Invalid light or material on {}.", object.name));
             }
+            if object
+                .normal_strength
+                .is_some_and(|value| !value.is_finite())
+            {
+                return Err(format!("Invalid normal strength on {}.", object.name));
+            }
+            if !(0. ..=animation::MAX_BLEND_SECONDS).contains(&object.animation_blend) {
+                return Err(format!(
+                    "Invalid animation transition duration on {}.",
+                    object.name
+                ));
+            }
+            let model = match object.shape {
+                Shape::Model(index) => self.models.get(index),
+                _ => None,
+            };
+            for (name, markers) in &object.animation_markers {
+                // Overrides for a removed clip can be recovered after reimporting it.
+                let duration = model
+                    .and_then(|m| m.animation_clip(name))
+                    .map_or(f32::MAX, |c| c.duration);
+                if !animation::valid_markers(markers, duration) {
+                    return Err(format!(
+                        "Invalid animation markers for clip '{name}' on {}.",
+                        object.name
+                    ));
+                }
+            }
             if let Some(state) = &object.animation {
-                let rig = match object.shape {
-                    Shape::Model(index) => self
-                        .models
-                        .get(index)
-                        .and_then(|model| model.rig.as_deref()),
-                    _ => None,
-                };
                 if !state.time.is_finite()
                     || state.time < 0.
                     || !(-10. ..=10.).contains(&state.speed)
-                    || rig.is_none_or(|rig| !rig.clips.iter().any(|clip| clip.name == state.clip))
+                    || model.and_then(|m| m.animation_clip(&state.clip)).is_none()
                 {
                     return Err(format!("Invalid animation on {}.", object.name));
                 }
@@ -813,40 +916,79 @@ fn on_event(object, event) {
             if model.rig.as_ref().is_some_and(|rig| !rig.validate()) {
                 return Err(format!("Invalid animation rig for {}.", model.name));
             }
+            let mut distance = 0.;
+            let mut triangles = triangle_count(&model.parts);
+            if model.lods.len() > Model::MAX_LODS || (!model.lods.is_empty() && model.rig.is_some())
+            {
+                return Err(format!(
+                    "LOD needs a static model with at most {} levels: {}.",
+                    Model::MAX_LODS,
+                    model.name
+                ));
+            }
+            for lod in model.lods.iter() {
+                let count = triangle_count(&lod.parts);
+                if !(0.1..=10_000.).contains(&lod.distance)
+                    || lod.distance <= distance
+                    || count == 0
+                    || count >= triangles
+                {
+                    return Err(format!(
+                        "LOD distances must increase and triangle counts decrease: {}.",
+                        model.name
+                    ));
+                }
+                distance = lod.distance;
+                triangles = count;
+            }
             if model.parts.is_empty()
-                || model.parts.iter().any(|part| {
-                    !part.surface.validate()
-                        || part.node.is_some_and(|node| {
-                            model.rig.as_ref().is_none_or(|rig| node >= rig.nodes.len())
-                        })
-                        || match part.skin {
-                            Some(index) => model
-                                .rig
-                                .as_ref()
-                                .and_then(|rig| rig.skins.get(index))
-                                .is_none_or(|skin| {
-                                    part.influences.len() != part.vertices.len()
-                                        || part.influences.iter().any(|influence| {
-                                            influence.joints.into_iter().zip(influence.weights).any(
-                                                |(joint, weight)| {
-                                                    !weight.is_finite()
-                                                        || weight < 0.
-                                                        || (weight > 0.
-                                                            && usize::from(joint)
-                                                                >= skin.joints.len())
-                                                },
-                                            )
-                                        })
-                                }),
-                            None => !part.influences.is_empty(),
-                        }
-                        || part.indices.is_empty()
-                        || part.indices.len() % 3 != 0
-                        || part
-                            .indices
-                            .iter()
-                            .any(|&index| index as usize >= part.vertices.len())
-                })
+                || model
+                    .parts
+                    .iter()
+                    .chain(model.lods.iter().flat_map(|lod| lod.parts.iter()))
+                    .any(|part| {
+                        !part.surface.validate()
+                            || part.normal_map.as_ref().is_some_and(|map| {
+                                !map.strength.is_finite()
+                                    || map.texture.is_empty()
+                                    || map.tangents.len() != part.vertices.len()
+                                    || map.tangents.iter().any(|t| {
+                                        !t.iter().all(|x| x.is_finite()) || t[3].abs() != 1.
+                                    })
+                            })
+                            || part.node.is_some_and(|node| {
+                                model.rig.as_ref().is_none_or(|rig| node >= rig.nodes.len())
+                            })
+                            || match part.skin {
+                                Some(index) => model
+                                    .rig
+                                    .as_ref()
+                                    .and_then(|rig| rig.skins.get(index))
+                                    .is_none_or(|skin| {
+                                        part.influences.len() != part.vertices.len()
+                                            || part.influences.iter().any(|influence| {
+                                                influence
+                                                    .joints
+                                                    .into_iter()
+                                                    .zip(influence.weights)
+                                                    .any(|(joint, weight)| {
+                                                        !weight.is_finite()
+                                                            || weight < 0.
+                                                            || (weight > 0.
+                                                                && usize::from(joint)
+                                                                    >= skin.joints.len())
+                                                    })
+                                            })
+                                    }),
+                                None => !part.influences.is_empty(),
+                            }
+                            || part.indices.is_empty()
+                            || part.indices.len() % 3 != 0
+                            || part
+                                .indices
+                                .iter()
+                                .any(|&index| index as usize >= part.vertices.len())
+                    })
             {
                 return Err(format!("Invalid triangles in {}", model.name));
             }
@@ -859,15 +1001,45 @@ pub struct PreparedScene {
     cube: Mesh,
     sphere: Mesh,
     plane: Mesh,
-    models: Vec<Vec<PreparedPart>>,
+    models: Vec<PreparedModel>,
+    lod_history: HashMap<u64, (usize, usize)>,
+    stats: RenderStats,
     renderer: Option<lighting::Renderer>,
     sky: Option<Material>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenderStats {
+    pub model_triangles: usize,
+    pub full_detail_triangles: usize,
+    pub lod_instances: usize,
+}
+
+struct PreparedModel {
+    base: Arc<[Part]>,
+    lods: Arc<[LodLevel]>,
+    levels: Vec<Vec<PreparedPart>>,
+}
+
+impl PreparedModel {
+    fn new(model: &Model) -> Self {
+        let levels = std::iter::once(model.parts.as_ref())
+            .chain(model.lods.iter().map(|lod| lod.parts.as_ref()))
+            .map(|parts| parts.iter().map(prepare_part).collect())
+            .collect();
+        Self {
+            base: model.parts.clone(),
+            lods: model.lods.clone(),
+            levels,
+        }
+    }
 }
 
 struct PreparedPart {
     batches: Vec<Batch>,
     metal: Option<Texture2D>,
     emissive: Option<Texture2D>,
+    normal: Option<Texture2D>,
 }
 
 struct Batch {
@@ -877,7 +1049,7 @@ struct Batch {
 
 impl PreparedScene {
     pub fn new(scene: &Scene) -> Self {
-        let renderer = match lighting::Renderer::new() {
+        let renderer = match lighting::Renderer::new(&scene.lighting) {
             Ok(renderer) => Some(renderer),
             Err(error) => {
                 macroquad::logging::error!("PBR renderer unavailable: {}", error);
@@ -893,13 +1065,15 @@ impl PreparedScene {
             cube: cube_mesh(),
             sphere: sphere_mesh(),
             plane: plane_mesh(),
-            models: scene
-                .models
-                .iter()
-                .map(|model| model.parts.iter().map(prepare_part).collect())
-                .collect(),
+            models: scene.models.iter().map(PreparedModel::new).collect(),
             renderer,
+            lod_history: HashMap::new(),
+            stats: RenderStats::default(),
         }
+    }
+
+    pub fn render_stats(&self) -> RenderStats {
+        self.stats
     }
 
     pub fn apply_color_shader(&mut self, source: &str) -> Result<(), String> {
@@ -910,11 +1084,56 @@ impl PreparedScene {
     }
 
     pub fn draw(&mut self, scene: &Scene, camera: &Camera3D, grid: bool, selected: Option<usize>) {
-        for model in scene.models.iter().skip(self.models.len()) {
-            self.models
-                .push(model.parts.iter().map(prepare_part).collect());
+        self.models.truncate(scene.models.len());
+        for (index, model) in scene.models.iter().enumerate() {
+            if let Some(prepared) = self.models.get_mut(index) {
+                if !Arc::ptr_eq(&prepared.base, &model.parts)
+                    || !Arc::ptr_eq(&prepared.lods, &model.lods)
+                {
+                    *prepared = PreparedModel::new(model);
+                    self.lod_history.retain(|_, (asset, _)| *asset != index);
+                }
+            } else {
+                self.models.push(PreparedModel::new(model));
+            }
         }
         let world = scene.world_transforms();
+        let mut active = HashMap::new();
+        self.stats = RenderStats::default();
+        let levels: Vec<_> = scene
+            .objects
+            .iter()
+            .zip(&world)
+            .map(|(object, (matrix, visible))| {
+                let Shape::Model(index) = object.shape else {
+                    return 0;
+                };
+                if !visible {
+                    return 0;
+                }
+                let model = &scene.models[index];
+                let level = if model.lods.is_empty() {
+                    0
+                } else {
+                    let distance = camera
+                        .position
+                        .distance(matrix.transform_point3(Vec3::ZERO));
+                    let previous = self
+                        .lod_history
+                        .get(&object.id)
+                        .filter(|&&(asset, _)| asset == index)
+                        .map(|&(_, level)| level);
+                    let level = model.lod_level(distance, previous);
+                    active.insert(object.id, (index, level));
+                    level
+                };
+                self.stats.model_triangles += triangle_count(model.parts_at(level));
+                self.stats.full_detail_triangles += triangle_count(&model.parts);
+                self.stats.lod_instances += usize::from(level > 0);
+                level
+            })
+            .collect();
+        self.lod_history = active;
         let poses: Vec<_> = scene
             .objects
             .iter()
@@ -929,11 +1148,12 @@ impl PreparedScene {
                 scene.models[index]
                     .rig
                     .as_ref()
-                    .map(|rig| rig.pose(object.animation.as_ref()))
+                    .map(|rig| object.animation_pose(rig))
             })
             .collect();
         let mut renderer = self.renderer.take();
         if let Some(gpu) = &mut renderer {
+            gpu.sync_shadow_profile(&scene.lighting);
             gpu.sync_shader(&scene.lighting.color_shader);
         }
         if let Some(gpu) = &renderer {
@@ -942,7 +1162,7 @@ impl PreparedScene {
                 set_camera(&shadow);
                 clear_background(WHITE);
                 gl_use_material(&gpu.depth);
-                self.geometry(scene, &world, &poses, Some(gpu), true);
+                self.geometry(scene, &world, &poses, &levels, Some(gpu), true);
                 gl_use_default_material();
             }
             set_camera(camera);
@@ -982,7 +1202,7 @@ impl PreparedScene {
         if let Some(gpu) = &renderer {
             gl_use_material(&gpu.main);
         }
-        self.geometry(scene, &world, &poses, renderer.as_ref(), false);
+        self.geometry(scene, &world, &poses, &levels, renderer.as_ref(), false);
         gl_use_default_material();
         if let Some(index) = selected {
             if let Some((matrix, true)) = world.get(index) {
@@ -1001,13 +1221,14 @@ impl PreparedScene {
         scene: &Scene,
         world: &[(Mat4, bool)],
         poses: &[Option<animation::Pose>],
+        levels: &[usize],
         gpu: Option<&lighting::Renderer>,
         shadow: bool,
     ) {
         let default = Surface::default();
-        let mut last_maps = (None, None);
+        let mut last_maps = [None; 3];
         if let Some(gpu) = gpu.filter(|_| !shadow) {
-            gpu.maps(None, None);
+            gpu.maps([None; 3]);
         }
         for (index, &(matrix, visible)) in world.iter().enumerate() {
             let object = &scene.objects[index];
@@ -1019,7 +1240,7 @@ impl PreparedScene {
                 Shape::Empty => {}
                 Shape::Cube | Shape::Sphere | Shape::Plane => {
                     let surface = object.surface.as_ref().unwrap_or(&default);
-                    configure_surface(gpu, shadow, matrix, surface, None, None, &mut last_maps);
+                    configure_surface(gpu, shadow, matrix, surface, [None; 3], 0., &mut last_maps);
                     if !shadow || surface.alpha != lighting::Alpha::Blend {
                         draw_mesh(match object.shape {
                             Shape::Cube => &self.cube,
@@ -1029,10 +1250,11 @@ impl PreparedScene {
                     }
                 }
                 Shape::Model(model) => {
+                    let level = levels[index];
                     for (part, prepared) in scene.models[model]
-                        .parts
+                        .parts_at(level)
                         .iter()
-                        .zip(&mut self.models[model])
+                        .zip(&mut self.models[model].levels[level])
                     {
                         let surface = object.surface.as_ref().unwrap_or(&part.surface);
                         if shadow && surface.alpha == lighting::Alpha::Blend {
@@ -1043,8 +1265,14 @@ impl PreparedScene {
                             shadow,
                             matrix,
                             surface,
-                            prepared.metal.as_ref(),
-                            prepared.emissive.as_ref(),
+                            [
+                                prepared.metal.as_ref(),
+                                prepared.emissive.as_ref(),
+                                prepared.normal.as_ref(),
+                            ],
+                            part.normal_map
+                                .as_ref()
+                                .map_or(0., |map| object.normal_strength.unwrap_or(map.strength)),
                             &mut last_maps,
                         );
                         for batch in &mut prepared.batches {
@@ -1054,7 +1282,15 @@ impl PreparedScene {
                                 {
                                     let animated = pose.vertex(part, source);
                                     vertex.position = Vec3::from_array(animated.position);
-                                    vertex.normal = Vec3::from_array(animated.normal).extend(0.);
+                                    let tangent = part.normal_map.as_ref().map(|map| {
+                                        pose.tangent(
+                                            part,
+                                            source,
+                                            animated.normal,
+                                            map.tangents[source],
+                                        )
+                                    });
+                                    vertex.normal = gpu_normal(animated.normal, tangent);
                                 }
                             }
                             draw_mesh(&batch.mesh);
@@ -1072,28 +1308,22 @@ fn configure_surface(
     shadow: bool,
     matrix: Mat4,
     surface: &Surface,
-    metal: Option<&Texture2D>,
-    emission: Option<&Texture2D>,
-    last_maps: &mut (
-        Option<macroquad::miniquad::TextureId>,
-        Option<macroquad::miniquad::TextureId>,
-    ),
+    textures: [Option<&Texture2D>; 3],
+    normal_strength: f32,
+    last_maps: &mut [Option<macroquad::miniquad::TextureId>; 3],
 ) {
     let Some(gpu) = gpu else { return };
     if shadow {
         gpu.caster(surface);
         return;
     }
-    let maps = (
-        metal.map(Texture2D::raw_miniquad_id),
-        emission.map(Texture2D::raw_miniquad_id),
-    );
+    let maps = textures.map(|map| map.map(Texture2D::raw_miniquad_id));
     if maps != *last_maps {
         // Custom sampler bindings are per pipeline, so submit earlier batches before changing them.
         unsafe {
             get_internal_gl().flush();
         }
-        gpu.maps(metal, emission);
+        gpu.maps(textures);
         *last_maps = maps;
     }
     let normal = if matrix.determinant().abs() > 1e-10 {
@@ -1102,7 +1332,46 @@ fn configure_surface(
         Mat4::IDENTITY
     };
     gpu.main.set_uniform("NormalMatrix", normal);
+    gpu.main.set_uniform(
+        "NormalStrength",
+        if textures[2].is_some() {
+            normal_strength
+        } else {
+            0.
+        },
+    );
+    gpu.main.set_uniform(
+        "ModelHandedness",
+        if matrix.determinant() < 0. {
+            -1_f32
+        } else {
+            1.
+        },
+    );
     gpu.surface(surface);
+}
+
+pub(crate) fn tangent_reference(normal: Vec3) -> Vec3 {
+    let axis = if normal.y.abs() < 0.9 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    axis.cross(normal).normalize_or_zero()
+}
+
+fn gpu_normal(normal: [f32; 3], tangent: Option<[f32; 4]>) -> Vec4 {
+    let n = Vec3::from_array(normal);
+    let Some([x, y, z, hand]) = tangent else {
+        return n.extend(0.);
+    };
+    let t = Vec3::new(x, y, z);
+    if n == Vec3::ZERO || t == Vec3::ZERO {
+        return n.extend(0.);
+    }
+    let basis = tangent_reference(n);
+    let angle = t.dot(n.cross(basis)).atan2(t.dot(basis));
+    n.extend(hand * (1.5 + angle / std::f32::consts::TAU))
 }
 
 fn raw_vertex(position: Vec3, normal: Vec3, uv: Vec2, color: [f32; 4]) -> Vertex {
@@ -1213,12 +1482,19 @@ fn prepare_part(part: &Part) -> PreparedPart {
                     let vertex = part.vertices[id as usize];
                     let index = vertices.len() as u16;
                     source.push(id as usize);
-                    vertices.push(raw_vertex(
+                    let mut gpu_vertex = raw_vertex(
                         Vec3::from_array(vertex.position),
                         Vec3::from_array(vertex.normal),
                         Vec2::from_array(vertex.uv),
                         vertex.color,
-                    ));
+                    );
+                    gpu_vertex.normal = gpu_normal(
+                        vertex.normal,
+                        part.normal_map
+                            .as_ref()
+                            .map(|map| map.tangents[id as usize]),
+                    );
+                    vertices.push(gpu_vertex);
                     index
                 }));
             }
@@ -1236,6 +1512,10 @@ fn prepare_part(part: &Part) -> PreparedPart {
         batches,
         metal: texture(part.metallic_roughness.as_ref()),
         emissive: texture(part.emissive_texture.as_ref()),
+        normal: part
+            .normal_map
+            .as_ref()
+            .and_then(|map| texture(Some(&map.texture))),
     }
 }
 
@@ -1267,12 +1547,16 @@ pub struct Playback {
     pub(crate) actions: GameActions,
     events: Vec<Event>,
     dropped_events: usize,
+    animation_events: Vec<animation::Event>,
 }
 
 impl Playback {
     pub fn new(mut scene: Scene) -> Result<Self, String> {
         scene.assign_ids()?;
         scene.validate_objects()?;
+        for object in &mut scene.objects {
+            object.animation_blend_state = None;
+        }
         let relays = crate::relay::Relays::from_scene(&scene)?;
         let mut scripts = Scripts::compile(&scene)?;
         let mut script_errors = Vec::new();
@@ -1296,6 +1580,7 @@ impl Playback {
             actions: GameActions::default(),
             events: Vec::new(),
             dropped_events: 0,
+            animation_events: Vec::new(),
         })
     }
 
@@ -1358,6 +1643,7 @@ impl Playback {
         } else {
             0.
         };
+        self.animation_events.clear();
         let movement = (movement + self.scene.bindings.move_axis(controls)).clamp_length_max(1.);
         self.actions = GameActions {
             movement,
@@ -1377,6 +1663,15 @@ impl Playback {
     }
 
     fn run_step(&mut self, movement: Vec2, dt: f32) {
+        for object in &mut self.scene.objects {
+            if object.animation_blend > 0.
+                && object.animation_blend_state.is_none()
+                && matches!(object.shape, Shape::Model(_))
+            {
+                object.animation_blend_state =
+                    Some(animation::BlendState::new(object.animation.as_ref()));
+            }
+        }
         let actions = GameActions {
             movement,
             jump: self
@@ -1409,11 +1704,57 @@ impl Playback {
             self.dropped_events += events.len() - preserved;
             self.events.extend(events.into_iter().take(preserved));
         }
-        for object in &mut self.scene.objects {
-            if let (Shape::Model(index), Some(player)) = (object.shape, &mut object.animation) {
-                animation::advance(&self.scene.models[index], player, dt);
+        let first_event = self.animation_events.len();
+        {
+            let world = self.physics.borrow();
+            for (index, object) in self.scene.objects.iter_mut().enumerate() {
+                let Shape::Model(model) = object.shape else {
+                    continue;
+                };
+                let model = &self.scene.models[model];
+                let Some(rig) = model.rig.as_deref() else {
+                    continue;
+                };
+                let motion = !object.animate_grounded_motion
+                    || world
+                        .as_ref()
+                        .is_some_and(|world| world.moving_on_ground(index));
+                if let Some(blend) = &mut object.animation_blend_state {
+                    blend.select(rig, object.animation.as_ref(), object.animation_blend);
+                }
+                if let Some(player) = object.animation.as_mut().filter(|_| motion) {
+                    if let Some(clip) = model.animation_clip(&player.clip) {
+                        let markers = object
+                            .animation_markers
+                            .get(&clip.name)
+                            .map_or(clip.markers.as_slice(), Vec::as_slice);
+                        animation::advance_markers(
+                            clip,
+                            player,
+                            dt,
+                            markers,
+                            animation::MAX_EVENTS - self.animation_events.len(),
+                            |marker| {
+                                self.animation_events.push(animation::Event {
+                                    object_id: object.id,
+                                    clip: clip.name.clone(),
+                                    name: marker.name.clone(),
+                                    time: marker.time,
+                                });
+                            },
+                        );
+                    }
+                }
+                if let Some(blend) = &mut object.animation_blend_state {
+                    blend.advance(model, object.animation.as_ref(), dt, motion);
+                }
             }
         }
+        self.scripts.animation_events(
+            &mut self.scene,
+            &self.animation_events[first_event..],
+            &mut self.script_errors,
+        );
         self.scripts
             .camera(&mut self.scene, &input, dt, &mut self.script_errors);
     }
@@ -1432,6 +1773,14 @@ impl Playback {
         self.scripts
             .ui(&mut self.scene, button, &mut self.script_errors);
         Ok(())
+    }
+
+    pub fn take_animation_events(&mut self) -> Vec<animation::Event> {
+        std::mem::take(&mut self.animation_events)
+    }
+
+    pub(crate) fn extend_effects(&mut self, effects: Vec<Effect>) {
+        self.scripts.extend_effects(effects);
     }
 
     pub(crate) fn take_effects(&mut self) -> Vec<Effect> {

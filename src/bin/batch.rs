@@ -145,6 +145,20 @@ fn run() -> Result<(), String> {
             }
             Ok(())
         }
+        (Some("project-model-lod"), [_, path, id, distance, source]) => {
+            change_project(path, |project| {
+                project.set_model_lod(
+                    text(id)?.parse().map_err(|_| "Expected a model ID.")?,
+                    text(distance)?
+                        .parse()
+                        .map_err(|_| "Expected a distance.")?,
+                    forge3d::import::model(Path::new(source))?,
+                )
+            })
+        }
+        (Some("project-model-lod-clear"), [_, path, id]) => change_project(path, |project| {
+            project.clear_model_lods(text(id)?.parse().map_err(|_| "Expected a model ID.")?)
+        }),
         (Some("project-reimport"), [_, path, id, source]) => change_project(path, |project| {
             project.reimport_asset(shared_asset(OsStr::new("model"), id)?, Path::new(source))
         }),
@@ -196,6 +210,7 @@ fn run() -> Result<(), String> {
   campaign-demo PROJECT | project-demo PROJECT | project-new SCENE PROJECT
   project-add PROJECT ID SCENE | project-ui PROJECT ID UI_JSON
   project-import PROJECT FILE... | project-assets PROJECT | project-uses PROJECT model|script ID
+  project-model-lod PROJECT MODEL_ID DISTANCE FILE | project-model-lod-clear PROJECT MODEL_ID
   project-deps PROJECT scene|prefab OWNER_ID
   project-reimport PROJECT model|script ID FILE
   project-models PROJECT | project-reimport PROJECT MODEL_ID MODEL_FILE

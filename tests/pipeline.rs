@@ -81,26 +81,33 @@ fn obj_reports_missing_material_and_resolves_textures_relative_to_it() {
 }
 
 #[test]
-fn gltf_and_glb_preserve_node_transforms() {
+fn gltf_and_glb_preserve_node_transforms_and_normal_maps() {
     let temp = tempfile::tempdir().unwrap();
-    let positions: Vec<u8> = [0_f32, 0., 0., 1., 0., 0., 0., 1., 0.]
-        .into_iter()
-        .flat_map(f32::to_le_bytes)
-        .collect();
+    let positions: Vec<u8> = [
+        0_f32, 0., 0., 1., 0., 0., 0., 1., 0., 0., 0., 0., 1., 1., 0.,
+    ]
+    .into_iter()
+    .flat_map(f32::to_le_bytes)
+    .collect();
     let mut document = json!({
         "asset": {"version": "2.0"},
         "scene": 0,
         "scenes": [{"nodes": [0]}],
         "nodes": [{"translation": [2, 3, 4], "mesh": 0}],
-        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "material": 0}]}],
         "buffers": [{"byteLength": positions.len()}],
-        "bufferViews": [{"buffer": 0, "byteLength": positions.len()}],
+        "bufferViews": [{"buffer": 0, "byteLength": 36}, {"buffer":0,"byteOffset":36,"byteLength":24}],
+        "images":[{"uri":"detail.png"}], "textures":[{"source":0}],
+        "materials":[{"normalTexture":{"index":0,"scale":0.6}}],
         "accessors": [{
             "bufferView": 0, "componentType": 5126, "count": 3,
             "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]
-        }]
+        }, {"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}]
     });
 
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([225, 128, 225, 255]))
+        .save(temp.path().join("detail.png"))
+        .unwrap();
     let mut json_bytes = serde_json::to_vec(&document).unwrap();
     while !json_bytes.len().is_multiple_of(4) {
         json_bytes.push(b' ');
@@ -123,8 +130,39 @@ fn gltf_and_glb_preserve_node_transforms() {
 
     for file in ["triangle.gltf", "triangle.glb"] {
         let model = import::model(&temp.path().join(file)).unwrap();
+        let map = model.parts[0].normal_map.as_ref().unwrap();
+        assert_eq!(map.strength, 0.6);
+        assert_eq!(map.tangents, vec![[0., 1., 0., -1.]; 3]);
         assert_eq!(model.parts[0].indices, [0, 1, 2]);
         assert_eq!(model.parts[0].vertices[0].position, [2., 3., 4.]);
         assert_eq!(model.parts[0].vertices[0].normal, [0., 0., 1.]);
     }
+
+    let mut buffer = fs::read(temp.path().join("triangle.bin")).unwrap();
+    let offset = buffer.len();
+    buffer.extend(
+        [0_f32, 1., 0., -1.]
+            .repeat(3)
+            .into_iter()
+            .flat_map(f32::to_le_bytes),
+    );
+    fs::write(temp.path().join("triangle.bin"), &buffer).unwrap();
+    document["buffers"][0]["byteLength"] = json!(buffer.len());
+    document["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"buffer":0,"byteOffset":offset,"byteLength":48}));
+    document["accessors"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"bufferView":2,"componentType":5126,"count":3,"type":"VEC4"}));
+    document["nodes"][0]["scale"] = json!([-1, 1, 1]);
+    document["meshes"][0]["primitives"][0]["attributes"]["TANGENT"] = json!(2);
+    let authored = temp.path().join("authored.gltf");
+    fs::write(&authored, document.to_string()).unwrap();
+    let part = &import::model(&authored).unwrap().parts[0];
+    assert_eq!(
+        part.normal_map.as_ref().unwrap().tangents,
+        vec![[0., 1., 0., 1.]; 3]
+    );
 }

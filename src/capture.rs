@@ -118,14 +118,15 @@ pub fn png(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, String> {
             }
             Shape::Model(index) => {
                 let model = &scene.models[index];
-                let pose = model
-                    .rig
-                    .as_ref()
-                    .map(|rig| rig.pose(object.animation.as_ref()));
-                for (part_index, part) in model.parts.iter().enumerate() {
+                let pose = model.rig.as_ref().map(|rig| object.animation_pose(rig));
+                let distance = camera
+                    .position
+                    .distance(matrix.transform_point3(Vec3::ZERO));
+                let level = model.lod_level(distance, None);
+                for (part_index, part) in model.parts_at(level).iter().enumerate() {
                     let material = object.surface.as_ref().unwrap_or(&part.surface);
                     let texture = if let Some(bytes) = &part.texture {
-                        let texture = match textures.entry((index, part_index)) {
+                        let texture = match textures.entry((index, level, part_index)) {
                             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                             std::collections::hash_map::Entry::Vacant(entry) => {
                                 let reader = || {

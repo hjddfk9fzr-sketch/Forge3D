@@ -1,13 +1,144 @@
 //! A standalone two-stage platform game built with ordinary Forge3D scenes and prefabs.
 use super::*;
 use crate::{
+    animation::{Clip, Interpolation, Marker, Node, Player, Property, Rig, Track},
     controls::Action,
-    lighting::{Skybox, Surface},
+    lighting::{ShadowProfile, Skybox, Surface},
     physics::Body,
     relay::{RelayGate, Role},
-    runtime::View,
+    runtime::{cube_mesh, LodLevel, ModelVertex, NormalMap, Part, View},
     settings::Application,
 };
+use std::sync::Arc;
+
+fn courier_model() -> Model {
+    let cube = cube_mesh();
+    let parts = [
+        ([1., 0.76, 1.], [1., 0.72, 0.23, 1.]),
+        ([0.36, 0.28, 0.53], [0.2, 0.27, 0.33, 1.]),
+        ([0.36, 0.28, 0.53], [0.2, 0.27, 0.33, 1.]),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(node, (size, color))| Part {
+        surface: Surface {
+            base_color: color,
+            ..Default::default()
+        },
+        metallic_roughness: None,
+        normal_map: None,
+        emissive_texture: None,
+        node: Some(node),
+        skin: None,
+        influences: vec![],
+        vertices: cube
+            .vertices
+            .iter()
+            .map(|v| ModelVertex {
+                position: (v.position * macroquad::prelude::Vec3::from_array(size)
+                    + macroquad::prelude::Vec3::Y * if node == 0 { 0.12 } else { 0. })
+                .to_array(),
+                normal: v.normal.truncate().to_array(),
+                uv: [0.; 2],
+                color: [1.; 4],
+            })
+            .collect(),
+        indices: cube.indices.iter().copied().map(u32::from).collect(),
+        texture: None,
+    })
+    .collect::<Vec<_>>();
+    let root = Node {
+        parent: None,
+        position: [0.; 3],
+        rotation: [0., 0., 0., 1.],
+        scale: [1.; 3],
+    };
+    let boot = |x| Node {
+        parent: Some(0),
+        position: [x, -0.37, 0.],
+        ..root.clone()
+    };
+    let track = |node, x, poses: [(f32, f32); 5], duration| Track {
+        node,
+        property: Property::Translation,
+        interpolation: Interpolation::Linear,
+        times: [0., 0.25, 0.5, 0.75, 1.]
+            .map(|phase| phase * duration)
+            .to_vec(),
+        values: poses.map(|(y, z)| [x, y, z, 0.]).to_vec(),
+    };
+    let left = [
+        (-0.22, 0.04),
+        (-0.37, -0.28),
+        (-0.37, 0.22),
+        (-0.32, 0.24),
+        (-0.22, 0.04),
+    ];
+    let right = [left[2], left[3], left[0], left[1], left[2]];
+    let gait = |name: &str, duration, reach| {
+        let scaled = |poses: [(f32, f32); 5]| poses.map(|(y, z)| (y, z * reach));
+        Clip {
+            name: name.into(),
+            duration,
+            tracks: vec![
+                track(1, -0.30, scaled(left), duration),
+                track(2, 0.30, scaled(right), duration),
+            ],
+            markers: [0.25, 0.75]
+                .map(|phase| Marker {
+                    name: "footstep".into(),
+                    time: phase * duration,
+                })
+                .to_vec(),
+        }
+    };
+    Model {
+        lods: Default::default(),
+        name: "Courier locomotion".into(),
+        parts: parts.into(),
+        rig: Some(
+            Rig {
+                nodes: vec![root.clone(), boot(-0.30), boot(0.30)],
+                skins: vec![],
+                clips: vec![
+                    Clip {
+                        name: "Idle".into(),
+                        duration: 1.,
+                        tracks: vec![],
+                        markers: vec![],
+                    },
+                    gait("Walk", 0.60, 0.68),
+                    gait("Run", 0.44, 1.25),
+                ],
+            }
+            .into(),
+        ),
+    }
+}
+
+fn footstep_wav() -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 22_050,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut wav =
+        hound::WavWriter::new(std::io::Cursor::new(&mut bytes), spec).map_err(|e| e.to_string())?;
+    let mut seed = 7u32;
+    for frame in 0..1550 {
+        let t = frame as f32 / 1550.;
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let noise = ((seed >> 16) as f32 / 32768.) - 1.;
+        let thud = (t * 12. * std::f32::consts::TAU).sin();
+        let sample = (0.28 * noise + 0.72 * thud) * (t * 40.).min(1.) * (1. - t).powi(3);
+        wav.write_sample((sample * 7500.) as i16)
+            .map_err(|e| e.to_string())?;
+    }
+    wav.finalize().map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
 
 fn block(name: &str, position: [f32; 3], size: [f32; 3], color: [f32; 3], glow: bool) -> Object {
     let mut o = Object::new(name, Shape::Cube);
@@ -19,6 +150,145 @@ fn block(name: &str, position: [f32; 3], size: [f32; 3], color: [f32; 3], glow: 
         ..Default::default()
     });
     o
+}
+
+fn deck_model() -> Result<Model, String> {
+    use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+    use macroquad::prelude::Vec3;
+    let cube = cube_mesh();
+    let (vertices, tangents): (Vec<_>, Vec<_>) = cube
+        .vertices
+        .iter()
+        .map(|v| {
+            let n = v.normal.truncate();
+            let reference = if n.y == 0. { Vec3::Y } else { Vec3::Z };
+            let tangent = reference.cross(n);
+            let bitangent = n.cross(tangent);
+            (
+                ModelVertex {
+                    position: v.position.to_array(),
+                    normal: n.to_array(),
+                    uv: [
+                        v.position.dot(tangent) + 0.5,
+                        v.position.dot(bitangent) + 0.5,
+                    ],
+                    color: [1.; 4],
+                },
+                tangent.extend(1.).to_array(),
+            )
+        })
+        .unzip();
+    let image = RgbaImage::from_fn(128, 128, |x, y| {
+        let wave = |p| (p as f32 / 128. * std::f32::consts::TAU * 8.).sin();
+        let n = Vec3::new(wave(x) * 0.65, wave(y) * 0.55, 1.).normalize();
+        let [r, g, b] = n
+            .to_array()
+            .map(|value| ((value * 0.5 + 0.5) * 255.).round() as u8);
+        Rgba([r, g, b, 255])
+    });
+    let mut texture = std::io::Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut texture, ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(Model {
+        lods: Default::default(),
+        name: "Ribbed deck".into(),
+        rig: None,
+        parts: vec![Part {
+            normal_map: Some(NormalMap {
+                texture: texture.into_inner(),
+                strength: 1.,
+                tangents,
+            }),
+            vertices,
+            indices: cube.indices.into_iter().map(u32::from).collect(),
+            surface: Surface::default(),
+            metallic_roughness: None,
+            emissive_texture: None,
+            node: None,
+            skin: None,
+            influences: vec![],
+            texture: None,
+        }]
+        .into(),
+    })
+}
+
+const DECK_MODEL: usize = 0;
+const BASALT_MODEL: usize = 1;
+
+fn basalt_parts(segments: usize, rings: usize) -> Arc<[Part]> {
+    use macroquad::prelude::Vec3;
+    let point = |ring: usize, side: usize| {
+        let height = ring as f32 / (rings - 1) as f32;
+        let angle = (side % segments) as f32 / segments as f32 * std::f32::consts::TAU;
+        let radius =
+            (0.36 + height * 0.13) * (1. + 0.08 * (angle * 5.).cos() + 0.04 * (angle * 3.).sin());
+        Vec3::new(angle.sin() * radius, height - 0.5, angle.cos() * radius)
+    };
+    let mut part = Part {
+        vertices: vec![],
+        indices: vec![],
+        surface: Surface::default(),
+        texture: None,
+        metallic_roughness: None,
+        normal_map: None,
+        emissive_texture: None,
+        node: None,
+        skin: None,
+        influences: vec![],
+    };
+    let mut face = |positions: &[Vec3]| {
+        let start = part.vertices.len() as u32;
+        let normal = (positions[1] - positions[0])
+            .cross(positions[2] - positions[0])
+            .normalize();
+        part.vertices.extend(positions.iter().map(|p| ModelVertex {
+            position: p.to_array(),
+            normal: normal.to_array(),
+            uv: [0.; 2],
+            color: [1.; 4],
+        }));
+        part.indices.extend([start, start + 1, start + 2]);
+        if positions.len() == 4 {
+            part.indices.extend([start, start + 2, start + 3]);
+        }
+    };
+    for side in 0..segments {
+        for ring in 0..rings - 1 {
+            face(&[
+                point(ring, side),
+                point(ring, side + 1),
+                point(ring + 1, side + 1),
+                point(ring + 1, side),
+            ]);
+        }
+        let top = rings - 1;
+        face(&[Vec3::Y * 0.5, point(top, side), point(top, side + 1)]);
+        face(&[Vec3::NEG_Y * 0.5, point(0, side + 1), point(0, side)]);
+    }
+    vec![part].into()
+}
+
+fn island_models(scene: &mut Scene) -> Result<(), String> {
+    scene.models.push(deck_model()?);
+    scene.models.push(Model {
+        name: "Basalt column".into(),
+        rig: None,
+        parts: basalt_parts(24, 5),
+        lods: vec![
+            LodLevel {
+                distance: 14.,
+                parts: basalt_parts(12, 3),
+            },
+            LodLevel {
+                distance: 24.,
+                parts: basalt_parts(6, 2),
+            },
+        ]
+        .into(),
+    });
+    Ok(())
 }
 
 fn island(
@@ -36,6 +306,7 @@ fn island(
         [0.24, 0.34, 0.40],
         false,
     );
+    deck.shape = Shape::Model(DECK_MODEL);
     deck.body = Some(Body::default());
     scene.add_object(deck)?;
     for side in [-1., 1.] {
@@ -70,8 +341,28 @@ fn island(
             [0.14, 0.20, 0.28],
             false,
         );
+        rock.shape = Shape::Model(BASALT_MODEL);
         rock.rotation[1] = i as f32 * 6.;
         scene.add_object(rock)?;
+    }
+    Ok(())
+}
+
+fn environment_samples(scene: &mut Scene, z: f32) -> Result<(), String> {
+    for (name, x, metallic, roughness) in [
+        ("Matte sky sample", -1.55, 0., 0.88),
+        ("Metal sky sample", 1.55, 1., 0.18),
+    ] {
+        let mut sample = Object::new(name, Shape::Sphere);
+        sample.position = [x, 0.38, z];
+        sample.scale = [0.7; 3];
+        sample.surface = Some(Surface {
+            base_color: [0.75, 0.78, 0.84, 1.],
+            metallic,
+            roughness,
+            ..Surface::default()
+        });
+        scene.add_object(sample)?;
     }
     Ok(())
 }
@@ -124,16 +415,22 @@ fn course(project: &Project, app: &Application, second: bool) -> Result<Scene, S
     } else {
         Skybox::Sunset
     };
-    scene.lighting.ambient = 0.72;
+    scene.lighting.ambient = 0.52;
+    scene.lighting.environment_strength = 1.15;
+    if second {
+        scene.lighting.shadow_profile = ShadowProfile::Mobile;
+    }
     let x = if second { 1.35 } else { 0. };
     let color = if second {
         [0.69, 0.56, 1.]
     } else {
         [0.28, 0.99, 0.87]
     };
+    island_models(&mut scene)?;
     for (cx, z, w, l) in [(0., 0., 4.2, 5.), (x, -6.5, 3.2, 4.6), (0., -13., 4.2, 5.)] {
         island(&mut scene, cx, z, w, l, color)?;
     }
+    environment_samples(&mut scene, 1.0)?;
     for (cx, z) in [(x, -6.5), (0., -13.)] {
         let id = project.instantiate("relay-arch", &mut scene, None)?;
         let index = scene.object_index(id)?;
@@ -168,6 +465,7 @@ fn course(project: &Project, app: &Application, second: bool) -> Result<Scene, S
             [0.20, 0.24, 0.38],
             false,
         );
+        rock.shape = Shape::Model(BASALT_MODEL);
         rock.rotation = [8., 27., 11.];
         scene.add_object(rock)?;
     }
@@ -178,6 +476,18 @@ fn course(project: &Project, app: &Application, second: bool) -> Result<Scene, S
         [1., 0.72, 0.23],
         false,
     );
+    courier.shape = Shape::Model(scene.models.len());
+    courier.surface = None;
+    scene.models.push(courier_model());
+    courier.animate_grounded_motion = true;
+    courier.animation_blend = 0.16;
+    courier.animation = Some(Player {
+        clip: "Idle".into(),
+        ..Player::default()
+    });
+    courier
+        .components
+        .insert("cloud-relay.footsteps".into(), true.into());
     courier.speed = 4.5;
     courier.body = Some(Body {
         jump_height: 1.45,
@@ -187,6 +497,12 @@ fn course(project: &Project, app: &Application, second: bool) -> Result<Scene, S
     courier.script = Some(format!(
         r#"fn update(object, dt, input) {{
         if object.y < -4.0 {{ object.next_scene="{here}"; }}
+        let intent = input.x * input.x + input.z * input.z;
+        let held = if intent < 0.01 {{ 0.0 }} else {{ (object.state["move_time"] ?? 0.0) + dt }};
+        object.state["move_time"] = min(held, 1.0);
+        object.anim_clip = if intent < 0.01 {{ "Idle" }}
+            else if intent < 0.55 || held < 0.27 {{ "Walk" }}
+            else {{ "Run" }};
         object
     }}
     fn camera(view,object,dt,input) {{
@@ -264,6 +580,10 @@ fn course(project: &Project, app: &Application, second: bool) -> Result<Scene, S
         .presentation
         .sounds
         .insert("signal".into(), demo_cue()?.into());
+    scene
+        .presentation
+        .sounds
+        .insert("footstep".into(), footstep_wav()?.into());
     Ok(scene)
 }
 
@@ -273,19 +593,21 @@ impl Project {
             title: "Cloud Relay".into(),
             identifier: "org.forge3d.cloudrelay".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            version_code: 143,
+            version_code: 150,
             ..Default::default()
         };
         let mut menu = Scene::empty();
         menu.application = app.clone();
         menu.title = "Cloud Relay".into();
         menu.lighting.skybox = Skybox::Sunset;
+        menu.lighting.environment_strength = 1.15;
         menu.camera = View {
             target: [0., 0.6, -3.],
             yaw: 26.,
             pitch: 9.,
             distance: 7.,
         };
+        island_models(&mut menu)?;
         island(&mut menu, 0., -3., 3.5, 5.2, [0.28, 0.99, 0.87])?;
         let mut title = Object::new("Launch relay", Shape::Empty);
         title.script = Some(
@@ -325,6 +647,7 @@ impl Project {
         let mut finish = menu;
         finish.title = "Signal delivered".into();
         finish.lighting.skybox = Skybox::Day;
+        finish.lighting.environment_strength = 1.15;
         finish.presentation.widgets = vec![
             text([0.09, 0.22, 0.82, 0.16], "SIGNAL DELIVERED"),
             text(

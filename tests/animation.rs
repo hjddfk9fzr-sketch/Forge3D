@@ -45,7 +45,7 @@ fn imports_and_samples_a_skinned_gltf_material() {
         "meshes":[{"primitives":[{"attributes":{"POSITION":0,"JOINTS_0":1,"WEIGHTS_0":2,"TEXCOORD_0":6},"material":0}]}],
         "images":[{"uri":"packed.png"}],"textures":[{"source":0}],
         "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0.6,0.75,0.8,1.0],"metallicFactor":0.8,"roughnessFactor":0.3,
-            "metallicRoughnessTexture":{"index":0}},"emissiveFactor":[0.05,0.0,0.25],"emissiveTexture":{"index":0}}],
+            "metallicRoughnessTexture":{"index":0}},"emissiveFactor":[0.05,0.0,0.25],"emissiveTexture":{"index":0},"normalTexture":{"index":0}}],
         "animations":[{"name":"Lift","samplers":[{"input":4,"output":5,"interpolation":"LINEAR"}],
             "channels":[{"sampler":0,"target":{"node":1,"path":"translation"}}]}]
     });
@@ -69,6 +69,10 @@ fn imports_and_samples_a_skinned_gltf_material() {
         [255, 64, 128, 255]
     );
     assert!(model.parts[0].emissive_texture.is_some());
+    assert_eq!(
+        model.parts[0].normal_map.as_ref().unwrap().tangents.len(),
+        model.parts[0].influences.len()
+    );
     let mut scene = Scene::empty();
     scene.models.push(model);
     scene
