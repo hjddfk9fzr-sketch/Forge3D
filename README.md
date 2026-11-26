@@ -13,9 +13,9 @@ Forge3D — 3D-движок на Rust. В настольном редактор�
 | Платформа | Редактор Forge3D | Игра Cloud Relay |
 | --- | --- | --- |
 | macOS · Apple Silicon | [Forge3D.app · ZIP](https://github.com/hjddfk9fzr-sketch/Forge3D/releases/download/v1.5.0/Forge3D-1.5.0-macOS-arm64.zip) | [Cloud Relay.app · ZIP](https://github.com/hjddfk9fzr-sketch/Forge3D/releases/download/v1.5.0/Cloud-Relay-1.5.0-macOS-arm64.zip) |
-| Windows · x64 | [Forge3D.exe](https://github.com/hjddfk9fzr-sketch/Forge3D/releases/download/v1.5.0/Forge3D-1.5.0-Windows-x64.exe) | [Cloud Relay.exe](https://github.com/hjddfk9fzr-sketch/Forge3D/releases/download/v1.5.0/Cloud-Relay-1.5.0-Windows-x64.exe) |
+| Windows · x64 | [Forge3D.exe · ZIP](https://github.com/hjddfk9fzr-sketch/Forge3D/releases/download/v1.5.0/Forge3D-1.5.0-Windows-x64.zip) | [Cloud Relay.exe · ZIP](https://github.com/hjddfk9fzr-sketch/Forge3D/releases/download/v1.5.0/Cloud-Relay-1.5.0-Windows-x64.zip) |
 
-На Mac распакуйте ZIP и откройте приложение. Сборки имеют ad-hoc подпись без нотарификации Apple. На Windows запустите скачанный EXE. Для готовых приложений Rust устанавливать не требуется. [Описание релиза](https://github.com/hjddfk9fzr-sketch/Forge3D/releases/tag/v1.5.0)
+На Mac распакуйте ZIP и откройте приложение. Сборки имеют ad-hoc подпись без нотарификации Apple. На Windows распакуйте ZIP и запустите EXE. Для готовых приложений Rust устанавливать не требуется. [Описание релиза](https://github.com/hjddfk9fzr-sketch/Forge3D/releases/tag/v1.5.0)
 
 ## Первый проект · измените маршрут Cloud Relay
 
