@@ -87,6 +87,10 @@ pub(crate) fn staged_game(
             directory.join("src/workshop.rs"),
             include_str!("workshop.rs"),
         )?;
+        fs::write(
+            directory.join("src/component.rs"),
+            include_str!("component.rs"),
+        )?;
         fs::write(directory.join("src/relay.rs"), include_str!("relay.rs"))?;
         fs::write(directory.join("src/game.rs"), include_str!("game.rs"))?;
         fs::write(

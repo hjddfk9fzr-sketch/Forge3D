@@ -1,6 +1,25 @@
-# Forge3D 1.4.1
+# Forge3D 1.4.2
 
 Forge3D — 3D-движок на Rust с настольным редактором сцен и экспортом игр в самостоятельные Cargo-проекты. Редактор использует Macroquad и egui. Игровой проект использует Macroquad и включает исходники рантайма.
+
+## Игровые компоненты в Inspector
+
+В 1.4.2 выберите объект и откройте **Inspector → Gameplay components → Add Component**. Для жетона выберите `workshop.pickup` и задайте **Pickup radius** в единицах сцены. Если жетон связан с префабом, **Revert** у свойства вернёт радиус шаблона. Для арки `RelayGate` доступны роль и список сцен назначения, для `workshop.spawn` — список префабов.
+
+Чтобы добавить свой компонент, включите его описание в `SCHEMAS` функции `workshop::component_schemas()`. Например:
+
+```rust
+Schema {
+    name: "puzzle.lever",
+    trigger: false,
+    fields: &[
+        Field::new("enabled", "Enabled", Kind::Toggle(true)),
+        Field::new("speed", "Speed", Kind::Number { default: 1., min: 0., max: 10. }),
+    ],
+}
+```
+
+Зарегистрируйте игровую систему с именем `puzzle.lever` в `game_systems()` и пересоберите редактор. Inspector создаст переключатель и числовое поле. Система получает значения через `ctx.data["enabled"]` и `ctx.data["speed"]`. Для компонента, который хранит единственное значение непосредственно в JSON, укажите пустой ключ поля. Экспорт включает реестр и игровые системы из той же сборки редактора.
 
 ## Cloud Relay и skybox в 1.4
 

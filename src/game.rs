@@ -39,17 +39,26 @@ impl Game {
         for (kind, entries) in [("scene", &self.scenes), ("prefab", &self.prefabs)] {
             for (id, scene) in entries {
                 for object in &scene.objects {
-                    let check = crate::relay::RelayGate::read(object).and_then(|gate| match gate {
-                        Some(gate) => {
-                            gate.validate(object, |target| self.scenes.contains_key(target))
+                    for schema in crate::workshop::component_schemas() {
+                        let Some(data) = object.components.get(schema.name) else {
+                            continue;
+                        };
+                        let check =
+                            if schema.trigger && !object.body.as_ref().is_some_and(|b| b.sensor) {
+                                Err(format!("{} needs a trigger collider", schema.name))
+                            } else {
+                                schema.validate(
+                                    data,
+                                    |s| self.scenes.contains_key(s),
+                                    |p| self.prefabs.contains_key(p),
+                                )
+                            };
+                        if let Err(error) = check {
+                            errors.push(format!(
+                                "{kind} '{id}', object '{}' #{}: {error}",
+                                object.name, object.id
+                            ));
                         }
-                        None => Ok(()),
-                    });
-                    if let Err(e) = check {
-                        errors.push(format!(
-                            "{kind} '{id}', object '{}' #{}: {e}",
-                            object.name, object.id
-                        ));
                     }
                 }
             }

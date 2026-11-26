@@ -273,7 +273,7 @@ impl Project {
             title: "Cloud Relay".into(),
             identifier: "org.forge3d.cloudrelay".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            version_code: 141,
+            version_code: 142,
             ..Default::default()
         };
         let mut menu = Scene::empty();

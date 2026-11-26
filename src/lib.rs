@@ -19,3 +19,5 @@ pub mod scripting;
 pub mod settings;
 pub mod workshop;
 pub mod workspace;
+
+pub mod component;
