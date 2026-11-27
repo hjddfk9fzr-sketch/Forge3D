@@ -74,51 +74,53 @@ fn receive_pickup(ctx: Context<'_>, commands: &mut Vec<Command>) -> Result<(), S
     Ok(())
 }
 
-/// Rebuild the editor after adding a schema; the exporter embeds this same registry.
+/// Built-in component descriptions shared by the editor and the runtime.
 pub fn component_schemas() -> &'static [crate::component::Schema] {
     use crate::component::{Field, Kind, Schema};
-    const SCHEMAS: &[Schema] = &[
-        Schema {
-            name: crate::relay::COMPONENT,
-            trigger: true,
-            fields: &[
-                Field::new(
-                    "role",
-                    "Role",
-                    Kind::Choice {
-                        default: "transmitter",
-                        options: &["transmitter", "exit"],
+    static SCHEMAS: std::sync::OnceLock<Vec<Schema>> = std::sync::OnceLock::new();
+    SCHEMAS.get_or_init(|| {
+        vec![
+            Schema {
+                name: crate::relay::COMPONENT.into(),
+                trigger: true,
+                fields: vec![
+                    Field::new(
+                        "role",
+                        "Role",
+                        Kind::Choice {
+                            default: "transmitter".into(),
+                            options: vec!["transmitter".into(), "exit".into()],
+                        },
+                    ),
+                    Field {
+                        when: Some(("role".into(), "exit".into())),
+                        ..Field::new("destination", "Destination", Kind::Scene)
                     },
-                ),
-                Field {
-                    when: Some(("role", "exit")),
-                    ..Field::new("destination", "Destination", Kind::Scene)
-                },
-            ],
-        },
-        Schema {
-            name: "workshop.pickup",
-            trigger: false,
-            fields: &[Field::new(
-                "",
-                "Pickup radius",
-                Kind::Number {
-                    default: 0.65,
-                    min: 0.,
-                    max: f32::MAX as f64,
-                },
-            )],
-        },
-        Schema {
-            name: "workshop.spawn",
-            trigger: false,
-            fields: &[Field::new("", "Prefab", Kind::Prefab)],
-        },
-        Schema {
-            name: "workshop.inventory",
-            trigger: false,
-            fields: &[Field::new("", "Items", Kind::Count(0))],
-        },
-    ];
-    SCHEMAS
+                ],
+            },
+            Schema {
+                name: "workshop.pickup".into(),
+                trigger: false,
+                fields: vec![Field::new(
+                    "",
+                    "Pickup radius",
+                    Kind::Number {
+                        default: 0.65,
+                        min: 0.,
+                        max: f32::MAX as f64,
+                    },
+                )],
+            },
+            Schema {
+                name: "workshop.spawn".into(),
+                trigger: false,
+                fields: vec![Field::new("", "Prefab", Kind::Prefab)],
+            },
+            Schema {
+                name: "workshop.inventory".into(),
+                trigger: false,
+                fields: vec![Field::new("", "Items", Kind::Count(0))],
+            },
+        ]
+    })
 }

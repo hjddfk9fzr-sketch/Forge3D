@@ -66,6 +66,26 @@ fn run() -> Result<(), String> {
         (Some("export"), [_, source, destination]) => {
             export::collection(&load_game(Path::new(source))?, Path::new(destination))
         }
+        (Some("rust-init"), [_, path]) => {
+            let file = Path::new(path);
+            let game = Project::load(file)?.game(None)?;
+            println!("{}", export::initialize_rust(&game, file)?.display());
+            Ok(())
+        }
+        (Some("rust-check"), [_, path]) | (Some("rust-check"), [_, path, _]) => {
+            let offline = args.get(2).is_some();
+            if offline && args[2] != "--offline" {
+                return Err("Expected --offline.".into());
+            }
+            let compiled =
+                forge3d::author::compile(&Project::load(Path::new(path))?.game(None)?, offline)?;
+            compiled.check()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&compiled.schemas).map_err(|e| e.to_string())?
+            );
+            Ok(())
+        }
         (Some("cloud-relay"), [_, path]) => Project::cloud_relay()?.save(Path::new(path), false),
         (Some("campaign-demo"), [_, path]) => {
             Project::campaign_demo()?.save(Path::new(path), false)
@@ -219,6 +239,7 @@ fn run() -> Result<(), String> {
   export SCENE_OR_PROJECT DIRECTORY | build SCENE_OR_PROJECT DIRECTORY PROFILE [TARGET]
   retry BUILD_DIRECTORY NEW_DIRECTORY
   cloud-relay PROJECT
+  rust-init PROJECT | rust-check PROJECT [--offline]
   package-editor TARGET EXECUTABLE OUTPUT"
             .into()),
     }

@@ -6,20 +6,20 @@
 
 Выберите объект и откройте **Inspector → Gameplay components → Add Component**. Для жетона выберите `workshop.pickup` и задайте **Pickup radius** в единицах сцены. Если жетон связан с префабом, **Revert** у свойства вернёт радиус шаблона. Для арки `RelayGate` доступны роль и список сцен назначения, для `workshop.spawn` — список префабов.
 
-Чтобы добавить свой компонент, включите его описание в `SCHEMAS` функции `workshop::component_schemas()`. Например:
+## Rust-проект игры
 
-```rust
-Schema {
-    name: "puzzle.lever",
-    trigger: false,
-    fields: &[
-        Field::new("enabled", "Enabled", Kind::Toggle(true)),
-        Field::new("speed", "Speed", Kind::Number { default: 1., min: 0., max: 10. }),
-    ],
-}
+1. Сохраните проект как `world.forge-project.json` и выберите **Project → Initialize Rust game…**. Понадобятся Cargo и Rust. Редактор создаст рядом `world.forge-project.rust` с Cargo-пакетом `game-code` и локальной копией API `forge-api` версии 1.6.0.
+2. Выберите объект и добавьте **project.spin** через **Inspector → Gameplay components → Add Component**. Задайте скорость вращения и нажмите **Play**. Редактор соберёт текущую сцену и откроет отдельное окно игры. Состояние Play изолировано от сохранений установленной игры.
+3. Редактируйте `game-code/src/lib.rs` и дополнительные исходники и зависимости в `game-code`. Функция `schemas()` описывает поля для Inspector, а `register(&mut Systems)` связывает имя компонента с системой. После правок нажмите **Project → Reload Rust components**, чтобы обновить поля, или снова нажмите **Play**. Ошибки Cargo с файлом и строкой отображаются в Console.
+4. Сохраните проект и выберите **File → Export Rust…** либо **Tools → Build…**. Сгенерированный Cargo-проект включает снимок сцены, API движка и код игры. Для переноса исходного проекта храните файл `.forge-project.json` и одноимённую папку `.rust` рядом. Если сохраняете проект под новым именем, перенесите пакет `game-code` в соответствующую папку.
+
+```sh
+forge3d-batch rust-init world.forge-project.json
+forge3d-batch rust-check world.forge-project.json
+forge3d-batch export world.forge-project.json world-export
 ```
 
-Зарегистрируйте игровую систему с именем `puzzle.lever` в `game_systems()` и пересоберите редактор. Inspector создаст переключатель и числовое поле. Система получает значения через `ctx.data["enabled"]` и `ctx.data["speed"]`. Для компонента, который хранит единственное значение непосредственно в JSON, укажите пустой ключ поля. Экспорт включает реестр и игровые системы из той же сборки редактора.
+`rust-check` собирает проект, проверяет пользовательские компоненты и печатает схемы. Поддерживаемая точка расширения пакета — `forge_api::component` и `forge_api::gameplay`. Для локальных зависимостей используйте пути внутри `game-code`, чтобы они скопировались в экспорт.
 
 ## Системы на Rust
 
@@ -27,7 +27,7 @@ Schema {
 
 Объект хранит данные именованных компонентов в `components`. Модуль Rust связывает имя компонента с функцией через `Systems::register`. Один игровой кадр читает снимок сцены и ставит команды в очередь. `Spawn` создаёт экземпляр префаба с новыми ID, `Despawn` удаляет поддерево, `Set` обновляет данные компонента, `Send` передаёт сообщение с ID получателя для обработки в следующем кадре. Ошибка в команде отменяет изменения всей очереди.
 
-Пример регистрации и трёх систем находится в [src/workshop.rs](https://github.com/hjddfk9fzr-sketch/Forge3D/blob/v1.4.2/src/workshop.rs), API — в [src/gameplay.rs](https://github.com/hjddfk9fzr-sketch/Forge3D/blob/v1.4.2/src/gameplay.rs). Для своего рантайма передайте реестр в `GamePlayback::with_systems`. Стандартный Play использует `workshop::game_systems()`. Экспорт включает этот модуль и префабы проекта. Изменения Rust-кода требуют пересборки соответствующего приложения.
+Пример регистрации и трёх систем находится в [src/workshop.rs](https://github.com/hjddfk9fzr-sketch/Forge3D/blob/v1.4.2/src/workshop.rs), API — в [src/gameplay.rs](https://github.com/hjddfk9fzr-sketch/Forge3D/blob/v1.4.2/src/gameplay.rs). Для своего рантайма передайте реестр в `GamePlayback::with_systems`. Для проектов без пакета `game-code` стандартный Play и экспорт используют встроенные системы Forge3D.
 
 ## Действия ввода
 

@@ -57,6 +57,8 @@ pub struct Project {
     models: BTreeMap<AssetId, Model>,
     scripts: BTreeMap<AssetId, ScriptAsset>,
     prefabs: BTreeMap<String, StoredScene>,
+    #[serde(skip)]
+    pub(crate) file: Option<std::path::PathBuf>,
 }
 
 impl Project {
@@ -68,6 +70,7 @@ impl Project {
             models: BTreeMap::new(),
             scripts: BTreeMap::new(),
             prefabs: BTreeMap::new(),
+            file: None,
         };
         project.add_scene(id, scene)?;
         Ok(project)
@@ -79,7 +82,7 @@ impl Project {
         first.application.title = "Forge3D · Two Workshops".into();
         first.application.identifier = "com.forge3d.betademo".into();
         first.application.version = env!("CARGO_PKG_VERSION").into();
-        first.application.version_code = 150;
+        first.application.version_code = 160;
         first.objects[0].script = Some(
             r#"fn update(object, dt, input) {
                 if input.x > 0.5 { object.next_scene = "workshop"; }
@@ -311,8 +314,10 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
 
     pub fn load(path: &Path) -> Result<Self, String> {
         let bytes = fs::read(path).map_err(|error| error.to_string())?;
-        let project: Self = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        let mut project: Self =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
         project.validate()?;
+        project.file = Some(path.canonicalize().map_err(|error| error.to_string())?);
         Ok(project)
     }
 
@@ -678,6 +683,12 @@ fn on_ui(object, event) { object.next_scene = "menu"; object }"#
         }
         Ok(Game {
             start,
+            rust_source: self
+                .file
+                .as_deref()
+                .map(crate::export::rust_directory)
+                .map(|p| p.join("game-code"))
+                .filter(|p| p.is_dir()),
             prefabs: self
                 .prefabs
                 .iter()

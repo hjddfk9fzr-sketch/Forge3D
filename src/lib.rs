@@ -1,4 +1,5 @@
 pub mod animation;
+pub mod author;
 pub mod capture;
 pub mod compatibility;
 pub mod controls;

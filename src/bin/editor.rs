@@ -1,3 +1,5 @@
+#[path = "support/author_preview.rs"]
+mod author_preview;
 #[path = "support/component_editor.rs"]
 mod component_editor;
 #[path = "support/script_editor.rs"]
@@ -468,6 +470,9 @@ struct Editor {
     prepared: PreparedScene,
     selected: Option<usize>,
     preview: Option<GamePlayback>,
+    rust_preview: Option<author_preview::Preview>,
+    rust_build: Option<author_preview::Build>,
+    schemas: Vec<forge3d::component::Schema>,
     overlay: Option<Overlay>,
     paused: bool,
     step_preview: bool,
@@ -525,6 +530,9 @@ impl Editor {
             scene,
             selected: Some(1),
             preview: None,
+            rust_preview: None,
+            rust_build: None,
+            schemas: forge3d::workshop::component_schemas().to_vec(),
             overlay: None,
             paused: false,
             step_preview: false,
@@ -564,6 +572,41 @@ impl Editor {
     }
 
     fn ui(&mut self, ctx: &egui::Context) {
+        if let Some(result) = self
+            .rust_build
+            .as_ref()
+            .and_then(author_preview::Build::poll)
+        {
+            let pending = self.rust_build.take().unwrap();
+            match result.and_then(|compiled| {
+                self.schemas = compiled.schemas.clone();
+                if pending.launch {
+                    self.rust_preview = Some(author_preview::Preview::launch(compiled)?);
+                    self.status = "Rust Play running in a separate window".into();
+                } else {
+                    self.status = "Rust components refreshed".into();
+                }
+                Ok(())
+            }) {
+                Ok(()) => {}
+                Err(error) => {
+                    self.record_script_error(error);
+                    self.open_console();
+                }
+            }
+        }
+        if let Some(result) = self
+            .rust_preview
+            .as_mut()
+            .and_then(author_preview::Preview::poll)
+        {
+            self.rust_preview = None;
+            self.status = "Rust Play stopped".into();
+            if let Err(error) = result {
+                self.record_script_error(error);
+                self.open_console();
+            }
+        }
         if let Some(job) = &mut self.build {
             if let Some(report) = job.status().cloned() {
                 self.status = format!("Build {}", report.state);
@@ -750,11 +793,13 @@ impl Editor {
                     ui.separator();
                     if ui
                         .button(
-                            RichText::new(if self.preview.is_some() {
-                                "■ Stop"
-                            } else {
-                                "▶ Play"
-                            })
+                            RichText::new(
+                                if self.preview.is_some() || self.rust_preview.is_some() {
+                                    "■ Stop"
+                                } else {
+                                    "▶ Play"
+                                },
+                            )
                             .strong()
                             .color(ACCENT),
                         )
@@ -1043,11 +1088,18 @@ impl Editor {
             Command::Play => {
                 self.paused = false;
                 self.step_preview = false;
-                if self.preview.is_some() {
+                if self.rust_preview.is_some() {
+                    self.rust_preview = None;
+                    self.status = "Rust Play stopped".into();
+                } else if self.rust_build.is_some() {
+                    self.status = "Rust build in progress".into();
+                } else if self.preview.is_some() {
                     self.preview = None;
                     self.overlay = None;
                     self.prepared = PreparedScene::new(&self.scene);
                     self.status = "Play stopped".into();
+                } else if self.rust_source().is_some() {
+                    self.build_rust(true);
                 } else {
                     match self.game(true).and_then(GamePlayback::new) {
                         Ok(preview) => {
@@ -1757,7 +1809,8 @@ impl Editor {
                     _ => None,
                 };
                 rendering_inspector(ui, object, model);
-                self.dirty |= component_editor::show(ui, object, self.project.as_ref());
+                self.dirty |=
+                    component_editor::show(ui, object, self.project.as_ref(), &self.schemas);
                 physics_inspector(ui, object);
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
@@ -2280,6 +2333,36 @@ impl Editor {
             .map(|(&id, script)| (id, script.name.clone()))
             .collect();
         ui.separator();
+        let saved_project = self.path.clone();
+        if let Some(file) = saved_project {
+            if self.rust_source().is_some() {
+                if ui
+                    .add_enabled(
+                        self.rust_build.is_none(),
+                        egui::Button::new("Reload Rust components"),
+                    )
+                    .clicked()
+                {
+                    self.build_rust(false);
+                    ui.close_menu();
+                }
+            } else if ui.button("Initialize Rust game…").clicked() {
+                let result = self
+                    .game(false)
+                    .and_then(|game| export::initialize_rust(&game, &file));
+                match result {
+                    Ok(directory) => {
+                        self.status = format!("Rust project: {}", directory.display());
+                        self.build_rust(false);
+                    }
+                    Err(error) => {
+                        self.record_script_error(error);
+                        self.open_console();
+                    }
+                }
+                ui.close_menu();
+            }
+        }
         ui.label(format!("Starting scene: {start}"));
         if ui.button("Save project…").clicked() {
             self.prompt(Action::ProjectSave);
@@ -2380,6 +2463,7 @@ impl Editor {
     }
 
     fn open_project(&mut self, project: Project, path: Option<PathBuf>) -> Result<(), String> {
+        self.reset_rust();
         let open = OpenProject::open(project);
         let scene = open.project.scene(&open.active)?;
         self.project_dirty = path.is_none();
@@ -2414,16 +2498,53 @@ impl Editor {
         Ok(format!("Added shared model {name}"))
     }
 
-    fn game(&self, play_active: bool) -> Result<Game, String> {
-        match &self.project {
-            Some(open) => open
-                .snapshot(&self.scene)?
-                .game(play_active.then_some(&open.active)),
-            None => Ok(Game::single(self.scene.clone())),
+    fn rust_source(&self) -> Option<PathBuf> {
+        self.project.as_ref()?;
+        self.path
+            .as_deref()
+            .and_then(|path| path.canonicalize().ok())
+            .map(|path| export::rust_directory(&path).join("game-code"))
+            .filter(|path| path.is_dir())
+    }
+
+    fn build_rust(&mut self, launch: bool) {
+        if self.rust_build.is_some() {
+            return;
+        }
+        match self
+            .game(launch)
+            .and_then(|game| author_preview::Build::start(game, launch))
+        {
+            Ok(build) => {
+                self.rust_build = Some(build);
+                self.status = "Building Rust game…".into();
+            }
+            Err(error) => {
+                self.record_script_error(error);
+                self.open_console();
+            }
         }
     }
 
+    fn game(&self, play_active: bool) -> Result<Game, String> {
+        let mut game = match &self.project {
+            Some(open) => open
+                .snapshot(&self.scene)?
+                .game(play_active.then_some(&open.active))?,
+            None => Game::single(self.scene.clone()),
+        };
+        game.rust_source = self.rust_source();
+        Ok(game)
+    }
+
+    fn reset_rust(&mut self) {
+        self.rust_preview = None;
+        self.rust_build = None;
+        self.schemas = forge3d::workshop::component_schemas().to_vec();
+    }
+
     fn detach_project(&mut self) {
+        self.reset_rust();
         self.project = None;
         self.project_dirty = false;
     }
@@ -2873,6 +2994,9 @@ impl Editor {
                     let project = open.snapshot(&self.scene)?;
                     project.save(path, self.path.as_deref() == Some(path))?;
                     open.project = project;
+                    if self.path.as_deref() != Some(path) {
+                        self.reset_rust();
+                    }
                     self.path = Some(path.to_owned());
                     self.saved = self.scene.clone();
                     self.project_dirty = false;

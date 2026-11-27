@@ -230,7 +230,9 @@ impl Job {
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.to_string()),
         };
-        let game = Game::decode(&start, additional.as_deref())?;
+        let mut game = Game::decode(&start, additional.as_deref())?;
+        let code = previous.join("game-code");
+        game.rust_source = code.is_dir().then_some(code);
         Self::spawn(Arc::new(game), directory, plan)
     }
 

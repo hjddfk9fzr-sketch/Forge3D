@@ -20,6 +20,8 @@ pub(crate) fn valid_id(id: &str) -> bool {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Game {
     pub start: String,
+    #[serde(skip)]
+    pub rust_source: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub prefabs: BTreeMap<String, Scene>,
     pub scenes: BTreeMap<String, Scene>,
@@ -29,18 +31,23 @@ impl Game {
     pub fn single(scene: Scene) -> Self {
         Self {
             prefabs: BTreeMap::new(),
+            rust_source: None,
             start: "main".into(),
             scenes: BTreeMap::from([("main".into(), scene)]),
         }
     }
 
     pub fn validate_components(&self) -> Result<(), String> {
+        self.validate_schemas(crate::workshop::component_schemas())
+    }
+
+    pub fn validate_schemas(&self, schemas: &[crate::component::Schema]) -> Result<(), String> {
         let mut errors = Vec::new();
         for (kind, entries) in [("scene", &self.scenes), ("prefab", &self.prefabs)] {
             for (id, scene) in entries {
                 for object in &scene.objects {
-                    for schema in crate::workshop::component_schemas() {
-                        let Some(data) = object.components.get(schema.name) else {
+                    for schema in schemas {
+                        let Some(data) = object.components.get(&schema.name) else {
                             continue;
                         };
                         let check =

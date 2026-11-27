@@ -3,7 +3,6 @@ use forge3d::{
     component::{Field, Kind, Schema},
     physics::Body,
     runtime::Object,
-    workshop::component_schemas,
     workspace::OpenProject,
 };
 use serde_json::Value;
@@ -18,8 +17,8 @@ fn field_ui(
     let value = field.value(data).unwrap_or(&default);
     let mut next = None;
     ui.horizontal(|ui| {
-        ui.label(field.label);
-        match field.kind {
+        ui.label(&field.label);
+        match field.kind.clone() {
             Kind::Number { default, min, max } => {
                 let mut n = value.as_f64().unwrap_or(default);
                 if ui
@@ -43,7 +42,7 @@ fn field_ui(
             }
             kind => {
                 let current = value.as_str().unwrap_or("");
-                egui::ComboBox::from_id_salt(field.key)
+                egui::ComboBox::from_id_salt(&field.key)
                     .selected_text(if current.is_empty() {
                         "Choose…"
                     } else {
@@ -58,7 +57,7 @@ fn field_ui(
                         match kind {
                             Kind::Choice { options, .. } => {
                                 for s in options {
-                                    option(s, s);
+                                    option(&s, &s);
                                 }
                             }
                             Kind::Scene => {
@@ -106,7 +105,7 @@ fn edit(
         return false;
     }
     let mut changed = false;
-    for field in schema.fields {
+    for field in &schema.fields {
         if field.visible(data) {
             changed |= field_ui(ui, field, data, project);
         }
@@ -125,23 +124,28 @@ fn edit(
     changed
 }
 
-pub fn show(ui: &mut egui::Ui, object: &mut Object, project: Option<&OpenProject>) -> bool {
+pub fn show(
+    ui: &mut egui::Ui,
+    object: &mut Object,
+    project: Option<&OpenProject>,
+    schemas: &[Schema],
+) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("Gameplay components")
         .default_open(true)
         .show(ui, |ui| {
             ui.menu_button("Add Component", |ui| {
-                for schema in component_schemas() {
+                for schema in schemas {
                     if ui
                         .add_enabled(
-                            !object.components.contains_key(schema.name),
-                            egui::Button::new(schema.name),
+                            !object.components.contains_key(&schema.name),
+                            egui::Button::new(&schema.name),
                         )
                         .clicked()
                     {
                         object
                             .components
-                            .insert(schema.name.into(), schema.default_value());
+                            .insert(schema.name.clone(), schema.default_value());
                         if schema.trigger {
                             object.body.get_or_insert_with(|| Body {
                                 sensor: true,
@@ -153,24 +157,24 @@ pub fn show(ui: &mut egui::Ui, object: &mut Object, project: Option<&OpenProject
                     }
                 }
             });
-            for schema in component_schemas() {
-                if !object.components.contains_key(schema.name) {
+            for schema in schemas {
+                if !object.components.contains_key(&schema.name) {
                     continue;
                 }
-                ui.push_id((object.id, schema.name), |ui| {
+                ui.push_id((object.id, &schema.name), |ui| {
                     ui.separator();
                     let remove = ui
                         .horizontal(|ui| {
-                            ui.strong(schema.name);
+                            ui.strong(&schema.name);
                             ui.small_button("Remove").clicked()
                         })
                         .inner;
                     if remove {
-                        object.components.remove(schema.name);
+                        object.components.remove(&schema.name);
                         changed = true;
                         return;
                     }
-                    if let Some(data) = object.components.get_mut(schema.name) {
+                    if let Some(data) = object.components.get_mut(&schema.name) {
                         changed |= edit(ui, schema, data, project);
                     }
                     if schema.trigger && !object.body.as_ref().is_some_and(|b| b.sensor) {

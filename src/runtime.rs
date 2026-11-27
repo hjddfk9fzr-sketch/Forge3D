@@ -1814,11 +1814,28 @@ pub async fn run_game(game: crate::game::Game, window_smoke: bool) {
 pub async fn run_measured(
     game: crate::game::Game,
     window_smoke: bool,
+    benchmark: Option<crate::performance::Benchmark>,
+) {
+    run_measured_with_systems(
+        game,
+        window_smoke,
+        benchmark,
+        crate::workshop::game_systems(),
+        false,
+    )
+    .await;
+}
+
+pub async fn run_measured_with_systems(
+    game: crate::game::Game,
+    window_smoke: bool,
     mut benchmark: Option<crate::performance::Benchmark>,
+    systems: crate::gameplay::Systems,
+    preview: bool,
 ) {
     let automated = window_smoke || benchmark.is_some();
     let start = game.start.clone();
-    let save_path = (!automated)
+    let save_path = (!automated && !preview)
         .then(|| {
             game.start_scene()
                 .ok()
@@ -1831,7 +1848,7 @@ pub async fn run_measured(
             Progress::default()
         })
     });
-    let mut playback = match crate::game::GamePlayback::with_progress(game, progress) {
+    let mut playback = match crate::game::GamePlayback::with_systems(game, progress, systems) {
         Ok(playback) => playback,
         Err(error) => {
             macroquad::logging::error!("{}", error);

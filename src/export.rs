@@ -9,6 +9,16 @@ pub fn collection(game: &Game, directory: &Path) -> Result<(), String> {
     staged_game(game, directory, None, || false)
 }
 
+pub fn rust_directory(project: &Path) -> std::path::PathBuf {
+    project.with_extension("rust")
+}
+
+pub fn initialize_rust(game: &Game, project: &Path) -> Result<std::path::PathBuf, String> {
+    let directory = rust_directory(project);
+    write_game(game, &directory, None, || false, true)?;
+    Ok(directory)
+}
+
 /// Checks the same scene and script requirements as an actual export,
 /// while leaving the input and filesystem untouched.
 pub fn validate(game: &Game) -> Result<(), String> {
@@ -38,7 +48,18 @@ pub(crate) fn staged_game(
     plan: Option<&[u8]>,
     cancelled: impl FnOnce() -> bool,
 ) -> Result<(), String> {
+    write_game(game, directory, plan, cancelled, false)
+}
+
+fn write_game(
+    game: &Game,
+    directory: &Path,
+    plan: Option<&[u8]>,
+    cancelled: impl FnOnce() -> bool,
+    sample: bool,
+) -> Result<(), String> {
     let mut game = validated_game(game)?;
+    let rust_source = game.rust_source.take();
     let scene = game
         .scenes
         .remove(&game.start)
@@ -55,10 +76,27 @@ pub(crate) fn staged_game(
         "fullscreen":app.android_fullscreen
     }))
     .map_err(|error| error.to_string())?;
-    let cargo = include_str!("../templates/game.toml").replace("FORGE_GAME_VERSION", &app.version);
+    let cargo = include_str!("../templates/game.toml").replace("FORGE_GAME_VERSION", &app.version)
+        .replace("[dependencies]","[dependencies]\nforge-api = { path = \"engine\" }\ngame-code = { path = \"game-code\" }");
+    let dependencies = include_str!("../templates/game.toml")
+        .split_once("[dependencies]")
+        .unwrap()
+        .1;
+    let engine=format!("[package]\nname = \"forge-api\"\nversion = \"{}\"\nedition = \"2021\"\n[lib]\npath = \"../src/engine.rs\"\n[dependencies]{dependencies}",env!("CARGO_PKG_VERSION"));
 
     publish(directory, cancelled, |directory| {
         fs::create_dir(directory.join("src"))?;
+        fs::create_dir(directory.join("engine"))?;
+        fs::write(directory.join("engine/Cargo.toml"), &engine)?;
+        fs::write(directory.join("src/engine.rs"),include_str!("../templates/game-engine.rs"))?;
+        let code=directory.join("game-code");
+        if let Some(source)=rust_source.as_deref().filter(|_|!sample) {
+            copy_author_code(source,&code)?;
+        } else {
+            fs::create_dir_all(code.join("src"))?;
+            fs::write(code.join("Cargo.toml"),format!("[package]\nname = \"game-code\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nforge-api = {{ version = \"={}\", path = \"../engine\" }}\n",env!("CARGO_PKG_VERSION")))?;
+            fs::write(code.join("src/lib.rs"),if sample {include_str!("../templates/author-code.rs")}else{include_str!("../templates/default-code.rs")})?;
+        }
         fs::create_dir(directory.join("assets"))?;
         fs::create_dir_all(directory.join("android/src/main"))?;
         fs::write(directory.join("Cargo.toml"), cargo)?;
@@ -147,6 +185,36 @@ pub(crate) fn staged_game(
         Ok(())
     })
     .map_err(|error| format!("Could not export to {}: {error}", directory.display()))
+}
+
+fn copy_author_code(source: &Path, destination: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(source)?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Expected a game-code directory.",
+        ));
+    }
+    fs::create_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "target" || name == ".git" {
+            continue;
+        }
+        let output = destination.join(name);
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_author_code(&entry.path(), &output)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), output)?;
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Rust source must contain only regular files and directories.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn publish(

@@ -76,6 +76,10 @@ pub enum Command {
     },
     Send(Message),
     PlaySound(String),
+    SetSpin {
+        id: u64,
+        degrees_per_second: f32,
+    },
     PlayAnimation {
         id: u64,
         clip: String,
@@ -182,6 +186,14 @@ impl Systems {
                         });
                         changed = true;
                     }
+                }
+                Command::SetSpin {
+                    id,
+                    degrees_per_second,
+                } => {
+                    let index = next.object_index(id)?;
+                    next.objects[index].spin = degrees_per_second;
+                    changed = true;
                 }
                 Command::Send(message) => outgoing.push(message),
                 Command::PlaySound(id) => sounds.push(crate::scripting::Effect::AnimationSound(id)),
