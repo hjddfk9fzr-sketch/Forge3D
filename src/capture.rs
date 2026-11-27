@@ -16,6 +16,9 @@ pub fn png(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, String> {
         return Err("Capture dimensions must be between 64 and 1024 pixels.".into());
     }
     scene.validate()?;
+    if let Some(canvas) = &scene.canvas2d {
+        return png_2d(scene, canvas, width, height);
+    }
     let mut canvas = Canvas {
         image: RgbImage::from_pixel(width, height, Rgb([22, 28, 42])),
         depth: vec![f32::INFINITY; (width * height) as usize],
@@ -331,4 +334,81 @@ impl Canvas {
             .ok_or("Preview is too complex. Reduce image size or visible geometry.")?;
         Ok(())
     }
+}
+
+fn png_2d(
+    scene: &Scene,
+    canvas: &crate::canvas2d::Canvas,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    use image::{Pixel, Rgba};
+    let area = crate::canvas2d::area(
+        Vec3::from_array(scene.camera.target),
+        scene.camera.distance.max(0.25),
+        width as f32 / height as f32,
+    );
+    let mut frame = RgbaImage::from_pixel(width, height, Rgba(canvas.background));
+    let mut atlases = HashMap::new();
+    let mut error = None;
+    let mut budget = 48_000_000;
+    crate::canvas2d::primitives(scene, canvas, area, |rect, sprite, color| {
+        let scale = height as f32 / area.h;
+        let x = (rect.x - area.x) * scale;
+        let y = (rect.y - area.y) * scale;
+        let w = rect.w * scale;
+        let h = rect.h * scale;
+        let pixels = |start: f32, length: f32, limit: u32| {
+            ((start - 0.5).ceil().clamp(0., limit as f32) as u32)
+                ..((start + length - 0.5).ceil().clamp(0., limit as f32) as u32)
+        };
+        let cols = pixels(x, w, width);
+        let rows = pixels(y, h, height);
+        if cols.is_empty() || rows.is_empty() || error.is_some() {
+            return;
+        }
+        let cost = (cols.end - cols.start) * (rows.end - rows.start);
+        if cost > budget {
+            error = Some("2D scene exceeds the capture drawing budget.".to_owned());
+            return;
+        }
+        budget -= cost;
+        let source = if let Some((id, source)) = sprite {
+            let atlas = atlases.entry(id.to_owned()).or_insert_with(|| {
+                image::load_from_memory_with_format(&canvas.atlases[id].png, ImageFormat::Png)
+                    .map(|image| image.into_rgba8())
+            });
+            match atlas {
+                Ok(image) => Some((image, source)),
+                Err(cause) => {
+                    error = Some(format!("Atlas '{id}': {cause}"));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        for py in rows {
+            for px in cols.clone() {
+                let pixel = if let Some((image, source)) = &source {
+                    let u =
+                        (((px as f32 + 0.5 - x) * source.w / w).floor()).clamp(0., source.w - 1.);
+                    let v =
+                        (((py as f32 + 0.5 - y) * source.h / h).floor()).clamp(0., source.h - 1.);
+                    *image.get_pixel((source.x + u) as u32, (source.y + v) as u32)
+                } else {
+                    Rgba(color)
+                };
+                frame.get_pixel_mut(px, py).blend(&pixel);
+            }
+        }
+    });
+    if let Some(error) = error {
+        return Err(error);
+    }
+    let mut data = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(frame)
+        .write_to(&mut data, ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
+    Ok(data.into_inner())
 }

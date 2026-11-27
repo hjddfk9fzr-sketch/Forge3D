@@ -1,3 +1,4 @@
+mod afterlight;
 mod cloud_relay;
 mod linked;
 use crate::gameplay::slot;
@@ -82,7 +83,7 @@ impl Project {
         first.application.title = "Forge3D · Two Workshops".into();
         first.application.identifier = "com.forge3d.betademo".into();
         first.application.version = env!("CARGO_PKG_VERSION").into();
-        first.application.version_code = 160;
+        first.application.version_code = 170;
         first.objects[0].script = Some(
             r#"fn update(object, dt, input) {
                 if input.x > 0.5 { object.next_scene = "workshop"; }

@@ -1,11 +1,19 @@
 #[path = "support/author_preview.rs"]
 mod author_preview;
+#[path = "support/canvas_editor.rs"]
+mod canvas_editor;
 #[path = "support/component_editor.rs"]
 mod component_editor;
+#[path = "support/editor_camera.rs"]
+mod editor_camera;
+#[path = "support/project_hub.rs"]
+mod project_hub;
 #[path = "support/script_editor.rs"]
 mod script_editor;
 #[path = "support/ui_designer.rs"]
 mod ui_designer;
+#[path = "support/viewport_gizmo.rs"]
+mod viewport_gizmo;
 
 use script_editor::{ScriptEditor, ScriptTarget};
 use ui_designer::UiDesigner;
@@ -88,6 +96,11 @@ fn ui_scale_path() -> Option<PathBuf> {
     Some(directory.join("editor-scale"))
 }
 
+fn editing_text(ctx: &egui::Context) -> bool {
+    ctx.memory(|memory| memory.focused())
+        .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some())
+}
+
 fn configure_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.visuals = egui::Visuals::dark();
@@ -124,6 +137,8 @@ enum Action {
     ProjectDemo,
     CampaignDemo,
     CloudRelay,
+    New2d,
+    PlatformerDemo,
     Presentation,
     Script,
     ProjectSave,
@@ -157,6 +172,8 @@ impl Action {
             Self::ProjectDemo => "Open two-scene demo",
             Self::CampaignDemo => "Open Workshop Run",
             Self::CloudRelay => "Open Cloud Relay",
+            Self::New2d => "New 2D scene",
+            Self::PlatformerDemo => "Open Afterlight",
             Self::Presentation => "Game UI Editor",
             Self::Script => "Script Editor",
             Self::ProjectSave => "Save project",
@@ -194,6 +211,8 @@ impl Action {
             Self::ProjectDemo => "Open the two-workshop demonstration project",
             Self::CampaignDemo => "Open the game with a menu and two levels",
             Self::CloudRelay => "Open the floating-island relay game",
+            Self::New2d => "Create an orthographic scene with a tile layer",
+            Self::PlatformerDemo => "Open the two-level 2D platformer project",
             Self::Presentation => "Design the game overlay for this scene",
             Self::Script => "Rhai source",
             Self::ProjectAdd => "Optional path to an existing .forge.json scene",
@@ -395,7 +414,7 @@ impl Command {
             Self::Pause => (plain, Key::F6),
             Self::Step => (plain, Key::F7),
             Self::Tool(TransformTool::Select) => (plain, Key::Q),
-            Self::Tool(TransformTool::Move) => (plain, Key::W),
+            Self::Tool(TransformTool::Move) => (plain, Key::G),
             Self::Tool(TransformTool::Rotate) => (plain, Key::E),
             Self::Tool(TransformTool::Scale) => (plain, Key::R),
         };
@@ -467,6 +486,10 @@ impl Browser {
 struct Editor {
     pads: controls::Gamepads,
     scene: Scene,
+    canvas_tools: canvas_editor::Tools,
+    hub: project_hub::Hub,
+    hub_visible: bool,
+    has_workspace: bool,
     prepared: PreparedScene,
     selected: Option<usize>,
     preview: Option<GamePlayback>,
@@ -514,7 +537,8 @@ struct Editor {
 
 impl Editor {
     fn new() -> Self {
-        let scene = Scene::rendering_demo();
+        let scene = Scene::empty();
+        let browser = Browser::new();
         let ui_scale_path = ui_scale_path();
         let ui_scale = ui_scale_path
             .as_ref()
@@ -524,11 +548,20 @@ impl Editor {
             .unwrap_or(DEFAULT_UI_SCALE);
         Self {
             prepared: PreparedScene::new(&scene),
+            canvas_tools: Default::default(),
+            hub: project_hub::Hub::new(
+                ui_scale_path
+                    .as_ref()
+                    .map(|path| path.with_file_name("projects.json")),
+                &browser.directory,
+            ),
+            hub_visible: true,
+            has_workspace: false,
             pads: Default::default(),
             view: scene.camera.clone(),
             saved: scene.clone(),
             scene,
-            selected: Some(1),
+            selected: None,
             preview: None,
             rust_preview: None,
             rust_build: None,
@@ -558,7 +591,7 @@ impl Editor {
             transform_tool: TransformTool::Move,
             object_filter: String::new(),
             asset_filter: String::new(),
-            browser: Browser::new(),
+            browser,
             build: None,
             build_report: None,
             last_build: None,
@@ -567,11 +600,26 @@ impl Editor {
             show_colliders: true,
             game_keyboard: false,
             grid: true,
-            status: "Light & Motion demo loaded".into(),
+            status: String::new(),
         }
     }
 
     fn ui(&mut self, ctx: &egui::Context) {
+        if self.hub_visible {
+            let choice = self.hub.show(ctx, &mut self.browser, self.has_workspace);
+            if self.dialog.is_none() {
+                match choice {
+                    Some(project_hub::Choice::Resume) => self.hub_visible = false,
+                    Some(project_hub::Choice::Launch(action, path)) => {
+                        self.launch_from_hub(action, path)
+                    }
+                    None => {}
+                }
+            }
+            self.show_dialog(ctx);
+            self.apply_ui_scale(ctx);
+            return;
+        }
         if let Some(result) = self
             .rust_build
             .as_ref()
@@ -650,6 +698,11 @@ impl Editor {
                     ui.separator();
                     ui.add_enabled_ui(!playing, |ui| {
                         ui.menu_button("File", |ui| {
+                            if ui.button("Project Hub").clicked() {
+                                self.hub_visible = true;
+                                ui.close_menu();
+                            }
+                            ui.separator();
                             for command in [
                                 Command::New,
                                 Command::Open,
@@ -663,6 +716,10 @@ impl Editor {
                                 }
                             }
                             ui.separator();
+                            if ui.button("New 2D scene…").clicked() {
+                                self.prompt(Action::New2d);
+                                ui.close_menu();
+                            }
                             if ui.button("Export Rust…").clicked() {
                                 self.prompt(Action::Export);
                                 ui.close_menu();
@@ -850,9 +907,13 @@ impl Editor {
                     );
                     if !playing {
                         ui.label(
-                            RichText::new("RMB Orbit  ·  MMB Pan  ·  Wheel Zoom")
-                                .small()
-                                .color(MUTED),
+                            RichText::new(if self.scene.canvas2d.is_some() {
+                                "WASD Pan  ·  MMB Pan  ·  Wheel Zoom"
+                            } else {
+                                "WASD Fly  ·  RMB Look  ·  Alt+RMB Orbit  ·  Wheel Zoom"
+                            })
+                            .small()
+                            .color(MUTED),
                         );
                     }
                 });
@@ -931,12 +992,18 @@ impl Editor {
                     }
                     ui.separator();
                     if self.preview.is_none() {
-                        for tool in TRANSFORM_TOOLS {
-                            let command = Command::Tool(tool);
-                            ui.selectable_value(&mut self.transform_tool, tool, command.title())
-                                .on_hover_text(ui.ctx().format_shortcut(&command.key()));
+                        if self.scene.canvas2d.is_some() {
+                            ui.selectable_value(&mut self.canvas_tools.painting, false, "Select");
+                            ui.selectable_value(
+                                &mut self.canvas_tools.painting,
+                                true,
+                                "Paint tiles",
+                            );
+                            if ui.button("+ Object").clicked() {
+                                self.add(canvas_editor::new_object(&self.view));
+                            }
+                            ui.separator();
                         }
-                        ui.separator();
                         if ui.button("Frame").on_hover_text("F").clicked() {
                             self.frame_selection();
                         }
@@ -953,21 +1020,47 @@ impl Editor {
                 self.viewport = ui.max_rect();
                 let response = ui.allocate_rect(self.viewport, egui::Sense::click_and_drag());
                 if !playing && self.dialog.is_none() {
-                    self.viewport_input(ui, &response);
-                    response.context_menu(|ui| {
-                        if self.selected.is_some() {
-                            if let Some(command) = Self::object_menu(ui) {
-                                self.command(command);
-                            }
-                            ui.separator();
-                        }
-                        self.context_create(ui);
+                    if self.scene.canvas2d.is_some() {
+                        self.navigate_viewport(ui.ctx(), &response);
+                        self.canvas_tools.viewport(
+                            ui,
+                            &response,
+                            &mut self.scene,
+                            &mut self.view,
+                            &mut self.selected,
+                        );
+                        return;
+                    }
+                    let gizmo = viewport_gizmo::Gizmo::new(self.viewport);
+                    let over_gizmo = ui.ctx().pointer_interact_pos().is_some_and(|pointer| {
+                        gizmo.as_ref().is_some_and(|gizmo| gizmo.contains(pointer))
                     });
-                    self.transform_handles(ui);
+                    if !over_gizmo || response.dragged() {
+                        self.viewport_input(ui, &response);
+                        self.navigate_viewport(ui.ctx(), &response);
+                        response.context_menu(|ui| {
+                            if self.selected.is_some() {
+                                if let Some(command) = Self::object_menu(ui) {
+                                    self.command(command);
+                                }
+                                ui.separator();
+                            }
+                            self.context_create(ui);
+                        });
+                    }
+                    self.transform_handles(ui, gizmo.as_ref());
+                    if let Some(gizmo) = gizmo {
+                        gizmo.show(ui, &mut self.view, &mut self.transform_tool);
+                    }
                 }
             });
         self.show_dialog(ctx);
-        let pointer_down = ctx.input(|input| input.pointer.primary_down());
+        let pointer_down = ctx.input(|input| {
+            input.pointer.primary_down()
+                || (self.scene.canvas2d.is_some()
+                    && self.canvas_tools.painting
+                    && input.pointer.secondary_down())
+        });
         if epoch == self.scene_epoch && !navigated_history && before != self.scene {
             if !self.pointer_edit {
                 self.history.record(before);
@@ -978,6 +1071,10 @@ impl Editor {
             self.pointer_edit = false;
         }
         self.dirty = self.scene != self.saved;
+        self.apply_ui_scale(ctx);
+    }
+
+    fn apply_ui_scale(&self, ctx: &egui::Context) {
         // egui-miniquad only reports native DPI when it changes. Use the
         // window's current DPI so the initial scale also works on Retina.
         let dpi = macroquad::miniquad::window::dpi_scale();
@@ -988,9 +1085,7 @@ impl Editor {
         if self.dialog.is_some() || self.preview.is_some() && self.game_keyboard {
             return false;
         }
-        let focused = ctx.memory(|memory| memory.focused());
-        let typing = focused.is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
-        if typing {
+        if editing_text(ctx) {
             if self.preview.is_none() {
                 let save = ctx.input_mut(|input| {
                     [Command::SaveAs, Command::Save]
@@ -1628,6 +1723,30 @@ impl Editor {
         ui.separator();
         ui.add_enabled_ui(!playing, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                if self.scene.canvas2d.is_some() {
+                    self.canvas_tools.inspector(
+                        ui,
+                        &mut self.scene,
+                        &self.view,
+                        self.selected,
+                        &self.browser.directory,
+                    );
+                    if let Some(index) = self.selected {
+                        ui.separator();
+                        let object = &mut self.scene.objects[index];
+                        component_editor::show(ui, object, self.project.as_ref(), &self.schemas);
+                        let id = object.id;
+                        let mut follows = self.scene.camera_controller == Some(id);
+                        if ui
+                            .checkbox(&mut follows, "Use this object's camera script")
+                            .changed()
+                        {
+                            self.scene.camera_controller = follows.then_some(id);
+                        }
+                        self.script_inspector(ui, index);
+                    }
+                    return;
+                }
                 let Some(index) = self.selected else {
                     self.dirty |= ui.text_edit_singleline(&mut self.scene.title).changed();
                     section(ui, "Game camera");
@@ -1998,7 +2117,7 @@ impl Editor {
         changed
     }
 
-    fn transform_handles(&mut self, ui: &mut egui::Ui) {
+    fn transform_handles(&mut self, ui: &mut egui::Ui, gizmo: Option<&viewport_gizmo::Gizmo>) {
         if self.transform_tool == TransformTool::Select {
             return;
         }
@@ -2041,7 +2160,10 @@ impl Editor {
                 continue;
             };
             let delta = end - start;
-            if delta.length_sq() < 144. || !self.viewport.contains(end) {
+            if delta.length_sq() < 144.
+                || !self.viewport.contains(end)
+                || gizmo.is_some_and(|gizmo| gizmo.contains(end))
+            {
                 continue;
             }
             let id = ui
@@ -2107,24 +2229,53 @@ impl Editor {
         }
     }
 
+    fn navigate_viewport(&mut self, ctx: &egui::Context, response: &egui::Response) {
+        if self.rust_preview.is_some()
+            || !(response.hovered() || response.dragged_by(egui::PointerButton::Secondary))
+            || editing_text(ctx)
+            || ctx.memory(|memory| memory.any_popup_open())
+        {
+            return;
+        }
+        let is_2d = self.scene.canvas2d.is_some();
+        let movement = ctx.input(|input| {
+            let modifiers = input.modifiers;
+            if !input.focused || modifiers.command || modifiers.ctrl || modifiers.alt {
+                return None;
+            }
+            let down = |key| if input.key_down(key) { 1. } else { 0. };
+            let vertical = if is_2d {
+                0.
+            } else {
+                down(egui::Key::Space) - down(egui::Key::C)
+            };
+            let axis = vec3(
+                down(egui::Key::D) - down(egui::Key::A),
+                down(egui::Key::W) - down(egui::Key::S),
+                vertical,
+            );
+            (axis != Vec3::ZERO).then_some((axis, input.stable_dt, modifiers.shift))
+        });
+        if let Some((axis, dt, fast)) = movement {
+            editor_camera::navigate(&mut self.view, is_2d, axis, dt, fast);
+        }
+    }
+
     fn viewport_input(&mut self, ui: &egui::Ui, response: &egui::Response) {
         let (delta, scroll) = ui.input(|input| (input.pointer.delta(), input.raw_scroll_delta.y));
         if response.dragged_by(egui::PointerButton::Secondary) {
-            self.view.yaw = (self.view.yaw - delta.x * 0.35).rem_euclid(360.);
-            self.view.pitch = (self.view.pitch + delta.y * 0.35).clamp(-85., 85.);
+            let orbit = ui.input(|input| input.modifiers.alt);
+            editor_camera::look(&mut self.view, delta.x, delta.y, orbit);
         }
         if response.dragged_by(egui::PointerButton::Middle) {
-            let camera = self.view.camera();
-            let forward = (camera.target - camera.position).normalize();
-            let right = forward.cross(Vec3::Y).normalize();
-            let up = right.cross(forward);
-            let offset = (-right * delta.x + up * delta.y) * self.view.distance * 0.002;
+            let basis = editor_camera::basis(&self.view);
+            let offset = (-basis.right * delta.x + basis.up * delta.y) * self.view.distance * 0.002;
             self.view.target = (Vec3::from_array(self.view.target) + offset).to_array();
         }
         if response.hovered() && scroll != 0. {
             self.view.distance = (self.view.distance * (-scroll * 0.006).exp()).clamp(0.25, 500.);
         }
-        if response.clicked() || response.secondary_clicked() {
+        if response.clicked_by(egui::PointerButton::Primary) || response.secondary_clicked() {
             if let Some(pointer) = response.interact_pointer_pos() {
                 self.selected = pick(&self.scene, &self.view, self.viewport, pointer);
             }
@@ -2145,6 +2296,12 @@ impl Editor {
     }
 
     fn context_create(&mut self, ui: &mut egui::Ui) {
+        if self.scene.canvas2d.is_some() {
+            if ui.button("Create 2D object").clicked() {
+                self.add(canvas_editor::new_object(&self.view));
+            }
+            return;
+        }
         ui.menu_button("Create object", |ui| {
             for (name, shape) in [
                 ("Empty", Shape::Empty),
@@ -2163,6 +2320,14 @@ impl Editor {
     fn frame_selection(&mut self) {
         if let Some(index) = self.selected {
             let object = &self.scene.objects[index];
+            if self.scene.canvas2d.is_some() {
+                self.view.target = self.scene.world_transforms()[index]
+                    .0
+                    .w_axis
+                    .truncate()
+                    .to_array();
+                return;
+            }
             let (min, max) = bounds(&self.scene, object.shape);
             let matrix = self.scene.world_transforms()[index].0;
             self.view.target = matrix.transform_point3((min + max) * 0.5).to_array();
@@ -2181,7 +2346,7 @@ impl Editor {
 
     async fn draw(&mut self) {
         clear_background(Color::from_rgba(20, 26, 39, 255));
-        if self.viewport.width() <= 1. || self.viewport.height() <= 1. {
+        if self.hub_visible || self.viewport.width() <= 1. || self.viewport.height() <= 1. {
             return;
         }
         let mut script_errors = Vec::new();
@@ -2253,7 +2418,7 @@ impl Editor {
             (self.viewport.height() * px).round() as i32,
         ));
         self.prepared.draw(scene, &camera, grid, selected);
-        if show_colliders {
+        if show_colliders && scene.canvas2d.is_none() {
             physics::draw_gizmos(scene, &camera);
         }
         for event in events {
@@ -2295,6 +2460,10 @@ impl Editor {
     fn project_menu(&mut self, ui: &mut egui::Ui) {
         if self.project.is_none() && ui.button("Create from current scene…").clicked() {
             self.prompt(Action::ProjectNew);
+            ui.close_menu();
+        }
+        if ui.button("Open Afterlight (2D)…").clicked() {
+            self.prompt(Action::PlatformerDemo);
             ui.close_menu();
         }
         if ui.button("Open Cloud Relay…").clicked() {
@@ -2550,6 +2719,9 @@ impl Editor {
     }
 
     fn replace_scene(&mut self, scene: Scene, path: Option<PathBuf>) {
+        self.hub_visible = false;
+        self.has_workspace = true;
+        self.canvas_tools = Default::default();
         self.prepared = PreparedScene::new(&scene);
         self.view = scene.camera.clone();
         self.saved = scene.clone();
@@ -2577,6 +2749,30 @@ impl Editor {
         self.status = "New scene".into();
     }
 
+    fn launch_from_hub(&mut self, action: Action, path: Option<PathBuf>) {
+        self.prompt(action);
+        let mut dialog = self.dialog.take().unwrap();
+        let has_path = path.is_some();
+        if let Some(path) = path {
+            dialog.path = path.to_string_lossy().into_owned();
+        }
+        if self.has_unsaved_changes() || matches!(action, Action::Open) && !has_path {
+            self.dialog = Some(dialog);
+        } else {
+            self.finish_dialog(dialog);
+        }
+    }
+
+    fn finish_dialog(&mut self, mut dialog: Dialog) {
+        match self.perform(&dialog) {
+            Ok(message) => self.status = message,
+            Err(error) => {
+                dialog.error = Some(error);
+                self.dialog = Some(dialog);
+            }
+        }
+    }
+
     fn prompt(&mut self, action: Action) {
         let path = match action {
             Action::New
@@ -2584,6 +2780,8 @@ impl Editor {
             | Action::RenderingDemo
             | Action::Application
             | Action::ProjectDemo
+            | Action::New2d
+            | Action::PlatformerDemo
             | Action::CloudRelay
             | Action::CampaignDemo
             | Action::Presentation
@@ -2671,7 +2869,7 @@ impl Editor {
                         | Action::RenderingDemo
                         | Action::Application
                         | Action::ProjectDemo
-                        | Action::CloudRelay | Action::CampaignDemo
+                        | Action::New2d | Action::PlatformerDemo | Action::CloudRelay | Action::CampaignDemo
                         | Action::Presentation
                         | Action::ColorShader
                         | Action::Dependencies
@@ -2826,7 +3024,7 @@ impl Editor {
                             | Action::RenderingDemo
                             | Action::Open
                             | Action::ProjectDemo
-                            | Action::CloudRelay | Action::CampaignDemo
+                            | Action::New2d | Action::PlatformerDemo | Action::CloudRelay | Action::CampaignDemo
                     );
                 if discarding {
                     ui.colored_label(Color32::YELLOW, "This will discard unsaved changes.");
@@ -2853,15 +3051,10 @@ impl Editor {
             return;
         }
         if submit {
-            match self.perform(&dialog) {
-                Ok(message) => {
-                    self.status = message;
-                    return;
-                }
-                Err(error) => dialog.error = Some(error),
-            }
+            self.finish_dialog(dialog);
+        } else {
+            self.dialog = open.then_some(dialog);
         }
-        self.dialog = open.then_some(dialog);
     }
 
     fn perform(&mut self, dialog: &Dialog) -> Result<String, String> {
@@ -2874,6 +3067,8 @@ impl Editor {
                 | Action::RenderingDemo
                 | Action::Application
                 | Action::ProjectDemo
+                | Action::New2d
+                | Action::PlatformerDemo
                 | Action::CloudRelay
                 | Action::CampaignDemo
                 | Action::Presentation
@@ -2950,24 +3145,40 @@ impl Editor {
             }
             Action::AssetUsage => Ok("Asset usage closed".into()),
             Action::New => {
-                self.new_scene();
-                Ok("New scene".into())
+                if self.hub_visible {
+                    self.open_project(Project::new("main", &Scene::empty())?, None)?;
+                    Ok("New 3D project".into())
+                } else {
+                    self.new_scene();
+                    Ok("New scene".into())
+                }
             }
             Action::PhysicsDemo => {
-                self.detach_project();
-                self.replace_scene(Scene::physics_demo(), None);
+                let scene = Scene::physics_demo();
+                if self.hub_visible {
+                    self.open_project(Project::new("main", &scene)?, None)?;
+                } else {
+                    self.detach_project();
+                    self.replace_scene(scene, None);
+                }
                 self.selected = Some(1);
                 Ok("Physics demo loaded".into())
             }
             Action::RenderingDemo => {
-                self.detach_project();
-                self.replace_scene(Scene::rendering_demo(), None);
+                let scene = Scene::rendering_demo();
+                if self.hub_visible {
+                    self.open_project(Project::new("main", &scene)?, None)?;
+                } else {
+                    self.detach_project();
+                    self.replace_scene(scene, None);
+                }
                 self.selected = Some(1);
                 Ok("Light & Motion demo loaded".into())
             }
             Action::Open => {
                 if path.to_string_lossy().ends_with(EXTENSION) {
                     self.open_project(Project::load(path)?, Some(path.to_owned()))?;
+                    self.hub.remember(path);
                 } else {
                     let scene = project::load(path)?;
                     self.detach_project();
@@ -3001,8 +3212,24 @@ impl Editor {
                     self.saved = self.scene.clone();
                     self.project_dirty = false;
                 }
+                self.hub.remember(path);
                 self.browser.refresh();
                 Ok(format!("Saved project {}", path.display()))
+            }
+            Action::New2d => {
+                let scene = forge3d::canvas2d::empty_2d();
+                if self.hub_visible {
+                    self.open_project(Project::new("main", &scene)?, None)?;
+                    Ok("New 2D project".into())
+                } else {
+                    self.detach_project();
+                    self.replace_scene(scene, None);
+                    Ok("New 2D scene".into())
+                }
+            }
+            Action::PlatformerDemo => {
+                self.open_project(Project::platformer()?, None)?;
+                Ok("Afterlight opened".into())
             }
             Action::CloudRelay => {
                 self.open_project(Project::cloud_relay()?, None)?;
@@ -3066,7 +3293,18 @@ impl Editor {
             Action::ProjectAdd => {
                 let id = dialog.scene_id.trim();
                 let scene = if path.as_os_str().is_empty() {
-                    let mut scene = Scene::empty();
+                    let mut scene = if let Some(canvas) = &self.scene.canvas2d {
+                        let mut scene = forge3d::canvas2d::empty_2d();
+                        scene
+                            .canvas2d
+                            .as_mut()
+                            .unwrap()
+                            .atlases
+                            .clone_from(&canvas.atlases);
+                        scene
+                    } else {
+                        Scene::empty()
+                    };
                     scene.title = id.into();
                     scene.application = self.scene.application.clone();
                     scene

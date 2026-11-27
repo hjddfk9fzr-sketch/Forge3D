@@ -116,6 +116,9 @@ fn write_game(
             directory.join("src/lib.rs"),
             include_str!("../templates/game-lib.rs"),
         )?;
+        fs::create_dir(directory.join("src/canvas2d"))?;
+        fs::write(directory.join("src/canvas2d.rs"),include_str!("canvas2d.rs"))?;
+        fs::write(directory.join("src/canvas2d/physics.rs"),include_str!("canvas2d/physics.rs"))?;
         fs::write(directory.join("src/runtime.rs"), include_str!("runtime.rs"))?;
         fs::write(
             directory.join("src/gameplay.rs"),

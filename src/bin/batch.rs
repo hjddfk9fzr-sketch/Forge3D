@@ -86,6 +86,10 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        (Some("platformer-demo"), [_, path]) => Project::platformer()?.save(Path::new(path), false),
+        (Some("demo-2d"), [_, path]) => {
+            project::save(&forge3d::canvas2d::empty_2d(), Path::new(path), false)
+        }
         (Some("cloud-relay"), [_, path]) => Project::cloud_relay()?.save(Path::new(path), false),
         (Some("campaign-demo"), [_, path]) => {
             Project::campaign_demo()?.save(Path::new(path), false)
@@ -238,7 +242,7 @@ fn run() -> Result<(), String> {
   prefab-create PROJECT PREFAB SCENE_ID OBJECT_ID | prefab-insert PROJECT PREFAB SCENE_ID
   export SCENE_OR_PROJECT DIRECTORY | build SCENE_OR_PROJECT DIRECTORY PROFILE [TARGET]
   retry BUILD_DIRECTORY NEW_DIRECTORY
-  cloud-relay PROJECT
+  cloud-relay PROJECT | platformer-demo PROJECT | demo-2d SCENE
   rust-init PROJECT | rust-check PROJECT [--offline]
   package-editor TARGET EXECUTABLE OUTPUT"
             .into()),

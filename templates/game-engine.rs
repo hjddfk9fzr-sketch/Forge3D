@@ -1,4 +1,6 @@
 #[allow(dead_code)]
+pub mod canvas2d;
+#[allow(dead_code)]
 mod animation;
 #[allow(dead_code)]
 pub mod controls;

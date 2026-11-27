@@ -1,5 +1,6 @@
 pub mod animation;
 pub mod author;
+pub mod canvas2d;
 pub mod capture;
 pub mod compatibility;
 pub mod controls;

@@ -22,6 +22,8 @@ pub struct Scene {
     pub application: Application,
     pub title: String,
     pub camera: View,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas2d: Option<crate::canvas2d::Canvas>,
     pub objects: Vec<Object>,
     pub models: Vec<Model>,
     #[serde(default)]
@@ -46,6 +48,7 @@ impl PartialEq for Scene {
             && self.application == other.application
             && self.title == other.title
             && self.camera == other.camera
+            && self.canvas2d == other.canvas2d
             && self.objects == other.objects
             && self.models == other.models
             && self.scripts == other.scripts
@@ -125,6 +128,10 @@ pub struct Object {
     pub cast_shadows: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<Body>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body2d: Option<crate::canvas2d::Body>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sprite2d: Option<crate::canvas2d::Sprite>,
     #[serde(default)]
     pub id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +191,8 @@ impl Object {
             cast_shadows: true,
             components: Default::default(),
             body: None,
+            body2d: None,
+            sprite2d: None,
             id: 0,
             parent: None,
             script_asset: None,
@@ -341,6 +350,7 @@ impl Scene {
             application: Application::default(),
             title: "Untitled Scene".into(),
             camera: View::default(),
+            canvas2d: None,
             objects: Vec::new(),
             models: Vec::new(),
             scripts: Vec::new(),
@@ -663,6 +673,9 @@ fn on_event(object, event) {
 
     pub fn set_parent(&mut self, child: u64, parent: Option<u64>) -> Result<(), String> {
         let index = self.object_index(child)?;
+        if parent.is_some() && self.objects[index].body2d.is_some() {
+            return Err("2D bodies must be at the scene root.".into());
+        }
         if parent.is_some()
             && (self.objects[index].is_dynamic() || self.objects[index].is_character())
         {
@@ -795,6 +808,9 @@ fn on_event(object, event) {
 
     pub fn validate_objects(&self) -> Result<(), String> {
         self.application.validate()?;
+        if let Some(canvas) = &self.canvas2d {
+            canvas.validate(self)?;
+        }
         if !self
             .camera
             .target
@@ -1006,6 +1022,7 @@ pub struct PreparedScene {
     stats: RenderStats,
     renderer: Option<lighting::Renderer>,
     sky: Option<Material>,
+    render2d: crate::canvas2d::Render,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1057,6 +1074,7 @@ impl PreparedScene {
             }
         };
         Self {
+            render2d: Default::default(),
             sky: lighting::sky_material()
                 .inspect_err(|e| {
                     macroquad::logging::error!("Skybox: {}", e);
@@ -1084,6 +1102,10 @@ impl PreparedScene {
     }
 
     pub fn draw(&mut self, scene: &Scene, camera: &Camera3D, grid: bool, selected: Option<usize>) {
+        if scene.canvas2d.is_some() {
+            self.render2d.draw(scene, camera, grid, selected);
+            return;
+        }
         self.models.truncate(scene.models.len());
         for (index, model) in scene.models.iter().enumerate() {
             if let Some(prepared) = self.models.get_mut(index) {
@@ -1542,6 +1564,7 @@ pub struct Playback {
     relays: crate::relay::Relays,
     script_errors: Vec<String>,
     physics: physics::World,
+    physics2d: crate::canvas2d::physics::World,
     accumulated: f64,
     pending_controls: InputControls,
     pub(crate) actions: GameActions,
@@ -1561,7 +1584,11 @@ impl Playback {
         let mut scripts = Scripts::compile(&scene)?;
         let mut script_errors = Vec::new();
         scripts.start(&mut scene, &mut script_errors);
-        let physics = physics::World::new(std::cell::RefCell::new(Physics::new(&scene)?));
+        let physics = physics::World::new(std::cell::RefCell::new(if scene.canvas2d.is_some() {
+            None
+        } else {
+            Physics::new(&scene)?
+        }));
         scripts.bind_physics(physics.clone());
         let initial_input = input_map(
             GameActions::default(),
@@ -1575,6 +1602,7 @@ impl Playback {
             relays,
             script_errors,
             physics,
+            physics2d: Default::default(),
             accumulated: 0.,
             pending_controls: InputControls::default(),
             actions: GameActions::default(),
@@ -1607,7 +1635,7 @@ impl Playback {
             None
         };
         let mut physics = self.physics.borrow_mut();
-        if !next.objects.iter().any(|o| o.body.is_some()) {
+        if next.canvas2d.is_some() || !next.objects.iter().any(|o| o.body.is_some()) {
             *physics = None;
         } else if let Some(world) = physics.as_mut() {
             world.sync(&next)?;
@@ -1650,7 +1678,7 @@ impl Playback {
             ..Default::default()
         };
         self.pending_controls.accumulate(controls);
-        if self.physics.borrow().is_none() {
+        if self.scene.canvas2d.is_none() && self.physics.borrow().is_none() {
             self.run_step(movement, dt);
             return;
         }
@@ -1687,14 +1715,19 @@ impl Playback {
         self.actions.interact |= actions.interact;
         let input = input_map(actions, &self.pending_controls, &self.scene.camera);
         self.pending_controls.clear_edges();
-        update(&mut self.scene, movement, dt);
+        if self.scene.canvas2d.is_none() {
+            update(&mut self.scene, movement, dt);
+        }
         self.scripts
             .step(&mut self.scene, &input, dt, &mut self.script_errors);
-        let events = self
-            .physics
-            .borrow_mut()
-            .as_mut()
-            .map(|physics| physics.step(&mut self.scene, movement, actions.jump));
+        let events = if self.scene.canvas2d.is_some() {
+            Some(self.physics2d.step(&mut self.scene, actions, dt))
+        } else {
+            self.physics
+                .borrow_mut()
+                .as_mut()
+                .map(|physics| physics.step(&mut self.scene, movement, actions.jump))
+        };
         if let Some(events) = events {
             self.scripts
                 .extend_effects(self.relays.events(&events, &self.scene));
